@@ -46,11 +46,10 @@ All reads and writes go through these functions so the backing store can be swap
 
 | Table | Key columns |
 |---|---|
-| `users` | `id`, `username`, `email`, `hashed_password`, `role`, `created_at` |
 | `recipes` | `id`, `name`, `station_id` (nullable — NULL = global), `description`, `active`, `created_at` |
 | `recipe_rules` | `id`, `recipe_id` (FK → recipes), `variable`, `correction_type` (additive\|multiplicative), `value`, `condition_json` |
 
-SQLite is used exclusively for relational data (users, recipes). Forecast data is never written here.
+SQLite is used exclusively for relational data (recipes). Forecast data is never written here. There is no users table — the service is unauthenticated.
 
 [Document every table here as it is added. This is the source of truth for the data model.]
 
@@ -74,10 +73,7 @@ SQLite is used exclusively for relational data (users, recipes). Forecast data i
 
 ## API Contracts
 
-### Auth
-- `POST /auth/register` — `{username, email, password}` → `{user_id, token}`
-- `POST /auth/login` — `{username, password}` → `{access_token, refresh_token}`
-- `POST /auth/refresh` — `{refresh_token}` → `{access_token}`
+No authentication. All endpoints are open — access is controlled at the network/container level.
 
 ### Forecast
 - `GET /api/forecast/station` — `?lat=&lon=&elevation=&hours=` → hourly ForecastResponse (probable + min + max per variable, 120h max); served from in-memory cache

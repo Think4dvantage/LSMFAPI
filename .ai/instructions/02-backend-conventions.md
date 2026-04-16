@@ -11,7 +11,6 @@ router = APIRouter(prefix="/api/forecast", tags=["forecast"])
 @router.get("/station")
 async def station_forecast(
     lat: float, lon: float, elevation: int, hours: int = 120,
-    current_user: User = Depends(get_current_user),
 ):
     ...
 ```
@@ -113,17 +112,6 @@ def circular_median(angles_deg: list[float]) -> float:
     rad = np.deg2rad(angles_deg)
     return float(np.rad2deg(np.arctan2(np.nanmedian(np.sin(rad)), np.nanmedian(np.cos(rad)))) % 360)
 ```
-
----
-
-## Auth Dependencies
-
-Import from `lsmfapi.api.dependencies`:
-
-| Dependency | Who passes |
-|---|---|
-| `get_current_user` | Any logged-in user |
-| `require_admin` | `admin` only |
 
 ---
 

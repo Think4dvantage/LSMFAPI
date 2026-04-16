@@ -12,12 +12,6 @@ The LSMFAPI GUI is an internal operator tool. **Do not add an i18n system.** No 
 
 ---
 
-## Authentication
-
-Use `fetchAuth()` from `auth.js` for all authenticated API calls. It auto-refreshes the JWT and redirects to `/login` on session expiry.
-
----
-
 ## Dark Theme
 
 All pages share the same design system:

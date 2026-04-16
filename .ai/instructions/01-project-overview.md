@@ -18,7 +18,6 @@ LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the
 | Relational DB | SQLite via SQLAlchemy (no Alembic — see backend conventions) |
 | Scheduler | APScheduler |
 | HTTP client | httpx (async) |
-| Auth | JWT via `python-jose`, passwords via `passlib` |
 | Config | YAML (`config.yml`) validated by Pydantic |
 | GRIB2 parsing | `cfgrib` + `xarray` + `eccodes` |
 | Spatial math | `scipy` (KD-tree nearest-point lookup) |
@@ -33,7 +32,6 @@ LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the
 src/lsmfapi/
 ├── api/
 │   ├── main.py              # FastAPI app factory + lifespan
-│   ├── dependencies.py      # Auth dependency functions
 │   └── routers/             # One file per domain
 │       ├── forecast.py      # GET /api/forecast/station
 │       ├── wind_grid.py     # GET /api/forecast/wind-grid
@@ -58,7 +56,6 @@ src/lsmfapi/
 └── scheduler.py             # APScheduler jobs
 static/
 ├── shared.css               # Dark theme
-├── auth.js                  # JWT storage, fetchAuth()
 ├── index.html + index.js    # Accuracy analysis GUI
 ├── recipes.html + recipes.js # Recipe editor (v0.2)
 ```
@@ -100,15 +97,6 @@ Accuracy GUI (browser)
 **Forecast Variables**: wind speed (10m), wind gusts (10m), wind direction (10m), temperature (2m), relative humidity, QFF pressure, precipitation, pressure-level winds at 9 altitude bands (500m/800m/1000m/1500m/2000m/2500m/3000m/4000m/5000m ASL).
 
 **Blending rule**: hours 0–30 from CH1-EPS (higher resolution), hours 30–120 from CH2-EPS.
-
----
-
-## User Roles
-
-| Role | Description |
-|---|---|
-| `admin` | Manage users, system config |
-| `user` | Standard authenticated access |
 
 ---
 

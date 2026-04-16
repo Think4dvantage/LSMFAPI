@@ -44,36 +44,23 @@ Never read `os.environ` directly in code — all configuration goes through `get
 
 ## API Overview
 
-### Auth
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| POST | `/auth/register` | — | Register a new user (`username`, `email`, `password`) |
-| POST | `/auth/login` | — | Obtain access + refresh tokens |
-| POST | `/auth/refresh` | — | Exchange refresh token for a new access token |
+No authentication. All endpoints are open — access is controlled at the network/container level.
 
 ### Forecast
 
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| GET | `/api/forecast/station` | user | Hourly blended station forecast: probable + min + max per variable, up to 120 h. Params: `lat`, `lon`, `elevation`, `hours` |
-| GET | `/api/forecast/wind-grid` | user | 171-point Switzerland wind grid at 9 altitude levels. Params: `date` (YYYY-MM-DD), `level_m` |
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/forecast/station` | Hourly blended station forecast: probable + min + max per variable, up to 120 h. Params: `lat`, `lon`, `elevation`, `hours` |
+| GET | `/api/forecast/wind-grid` | 171-point Switzerland wind grid at 9 altitude levels. Params: `date` (YYYY-MM-DD), `level_m` |
 
 ### Recipes (v0.2)
 
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| GET | `/api/recipes` | user | List all recipes |
-| POST | `/api/recipes` | user | Create a recipe |
-| PUT | `/api/recipes/{id}` | user | Update a recipe |
-| DELETE | `/api/recipes/{id}` | user | Delete a recipe |
-
-### User roles
-
-| Role | Access |
-|---|---|
-| `admin` | Manage users, system config |
-| `user` | Standard authenticated access |
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/recipes` | List all recipes |
+| POST | `/api/recipes` | Create a recipe |
+| PUT | `/api/recipes/{id}` | Update a recipe |
+| DELETE | `/api/recipes/{id}` | Delete a recipe |
 
 ---
 
@@ -123,7 +110,6 @@ Accuracy GUI (browser)
 src/lsmfapi/
 ├── api/
 │   ├── main.py              # FastAPI app factory + lifespan
-│   ├── dependencies.py      # Auth dependency functions
 │   └── routers/             # One file per domain
 │       ├── forecast.py      # GET /api/forecast/station
 │       ├── wind_grid.py     # GET /api/forecast/wind-grid
@@ -166,7 +152,6 @@ All cache access goes through `database/cache.py` getter/setter functions so the
 
 | Table | Key columns |
 |---|---|
-| `users` | `id`, `username`, `email`, `hashed_password`, `role`, `created_at` |
 | `recipes` | `id`, `name`, `station_id` (nullable = global), `description`, `active`, `created_at` |
 | `recipe_rules` | `id`, `recipe_id` (FK), `variable`, `correction_type` (`additive`\|`multiplicative`), `value`, `condition_json` |
 
