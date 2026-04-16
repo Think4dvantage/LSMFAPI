@@ -1,0 +1,19 @@
+services:
+  lsmfapi:
+    volumes:
+      - ./src:/app/src:ro,z
+      - ./static:/app/static:ro,z
+    environment:
+      - PYTHONPYCACHEPREFIX=/tmp/pycache
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.lsmfapi-dev.rule=Host(`lsmfapi-dev.lg4.ch`)"
+      - "traefik.http.routers.lsmfapi-dev.entrypoints=websecure"
+      - "traefik.http.routers.lsmfapi-dev.tls=true"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    external: true

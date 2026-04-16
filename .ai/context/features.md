@@ -14,17 +14,31 @@
 
 ## v0.1 — MVP: Core Service + Accuracy GUI
 
+### Data collection
 - Fetch station list from Lenticularis API on startup; refresh before each collection run
 - Trigger an immediate collection run on container startup to warm the in-memory cache
-- ICON-CH1-EPS collector: download GRIB2 from MeteoSwiss open data, parse with cfgrib, compute ensemble stats (median + abs min/max across all members × runs), precompute ForecastResponse for every known station, store in in-memory dict
-- ICON-CH2-EPS collector: same, 30h–120h range only
-- `GET /api/forecast/station` — hourly blended station forecast (probable + min + max, 7 variables); pure cache lookup
-- `GET /api/forecast/wind-grid` — 171-point Switzerland wind grid at 9 altitude levels (same geometry as Lenticularis); pure cache lookup
-- APScheduler jobs: `collect_ch1eps` (every 3h), `collect_ch2eps` (every 6h) — no purge job needed (cache is in-memory)
+- ICON-CH1-EPS collector (1.1 km resolution): download GRIB2 via MeteoSwiss STAC API, parse with cfgrib + eccodes-cosmo-resources, compute ensemble stats (median + abs min/max across all 11 members × runs), precompute ForecastResponse for every known station, store in in-memory dict
+- ICON-CH2-EPS collector (2.2 km resolution): same, 30h–120h range only, 21 members
+
+### Variables collected per hour per station (full `ForecastResponse`)
+- Surface winds: speed, gusts, direction (10m)
+- Temperature (2m), relative humidity (computed from QV+T+PS), QFF pressure
+- Precipitation (mm/h)
+- Radiation: solar direct (W/m²), solar diffuse (W/m²), sunshine minutes/h
+- Cloud cover: total, low, mid, high (%), convective cloud base (m AGL)
+- Thermics: boundary layer height (m AGL), freezing level (m ASL), CAPE (J/kg), CIN (J/kg)
+- Pressure-level winds at 9 altitude bands (500–5000m ASL): speed, direction, **vertical wind** (m/s)
+
+### API
+- `GET /api/forecast/station` — 120h blended station forecast, all variables above
+- `GET /api/forecast/wind-grid` — 171-point Switzerland wind grid at 9 altitude levels; includes vertical wind per point
+- APScheduler: `collect_ch1eps` (every 3h), `collect_ch2eps` (every 6h)
+
+### Infrastructure
 - Accuracy analysis GUI (English only, read-only): station picker + date range → fetches actuals + historical forecasts from Lenticularis → bias charts + RMSE table
 - Docker + docker-compose (base + dev overlay), Traefik labels
 
-**First task before any code**: confirm exact GRIB2 download URLs + file naming from MeteoSwiss STAC catalog, document in architecture.md.
+**STAC API confirmed. Variable names and de-accumulation strategy documented in architecture.md. Ready to implement collectors.**
 
 ---
 

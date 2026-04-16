@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:opendatadocs.meteoswiss.ch)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:meteoswiss.github.io)",
+      "WebFetch(domain:docs.geo.admin.ch)",
+      "WebFetch(domain:data.geo.admin.ch)",
+      "WebFetch(domain:rgw.cscs.ch)",
+      "WebFetch(domain:www.dwd.de)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:ethz.ch)",
+      "WebFetch(domain:www.cosmo-model.org)",
+      "WebFetch(domain:www.meteoswiss.admin.ch)"
+    ]
+  }
+}

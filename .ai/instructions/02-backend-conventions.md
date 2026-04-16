@@ -76,6 +76,39 @@ This keeps the backing store swappable without touching router or collector code
 
 ---
 
+## MeteoSwiss STAC API — File Discovery
+
+Files are not at predictable URLs. Each variable+step must be discovered via POST:
+
+```python
+import httpx
+
+async def stac_search(
+    base_url: str, collection: str, ref_dt: str, variable: str,
+    horizon_iso: str, perturbed: bool = True
+) -> str:
+    """Returns the GRIB2 download URL for one variable, one step."""
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{base_url}/search",
+            json={
+                "collections": [collection],
+                "forecast:reference_datetime": ref_dt,   # e.g. "2025-03-12T12:00:00Z"
+                "forecast:variable": variable,            # e.g. "U_10M"
+                "forecast:perturbed": perturbed,
+                "forecast:horizon": horizon_iso,          # e.g. "P0DT06H00M00S"
+            },
+        )
+        r.raise_for_status()
+        return r.json()["features"][0]["assets"]["data"]["href"]
+```
+
+`forecast:perturbed: true` → one GRIB2 file containing all N members (11 for CH1-EPS, 21 for CH2-EPS) as stacked GRIB2 messages. cfgrib reads the `number` dimension.
+
+**Data availability window**: 24 hours from publication. Always search for the most recent completed run.
+
+---
+
 ## GRIB2 Parsing (Collectors)
 
 Use `cfgrib` + `xarray` to open GRIB2 files. Each collector downloads a GRIB2 file via `httpx` (async), saves it to a temp path, then opens it with xarray:

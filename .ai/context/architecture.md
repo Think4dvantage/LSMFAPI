@@ -55,6 +55,167 @@ SQLite is used exclusively for relational data (recipes). Forecast data is never
 
 ---
 
+## MeteoSwiss Open Data — STAC API
+
+### Base endpoint
+
+```
+https://data.geo.admin.ch/api/stac/v1/
+```
+
+### Collection IDs
+
+| Model | Collection ID |
+|---|---|
+| ICON-CH1-EPS | `ch.meteoschweiz.ogd-forecasting-icon-ch1` |
+| ICON-CH2-EPS | `ch.meteoschweiz.ogd-forecasting-icon-ch2` |
+
+### File discovery — STAC search
+
+Files are discovered at runtime via a `POST` to the search endpoint. There is no static filename pattern to construct.
+
+```
+POST https://data.geo.admin.ch/api/stac/v1/search
+Content-Type: application/json
+
+{
+  "collections": ["ch.meteoschweiz.ogd-forecasting-icon-ch1"],
+  "forecast:reference_datetime": "2025-03-12T12:00:00Z",
+  "forecast:variable": "U_10M",
+  "forecast:perturbed": true,
+  "forecast:horizon": "P0DT02H00M00S"
+}
+```
+
+Response contains `features[].assets` with `href` (pre-signed download URL for a GRIB2 file).
+
+Key search parameters:
+- `forecast:reference_datetime` — run initialisation time (ISO 8601 UTC)
+- `forecast:variable` — ICON variable name (see table below)
+- `forecast:perturbed` — `false` = control run, `true` = ensemble perturbations
+- `forecast:horizon` — lead time as ISO 8601 duration (e.g. `P0DT06H00M00S` = +6h)
+
+**Data availability window**: 24 hours from publication. Scheduler intervals (3h / 6h) are well within this window.
+
+### ICON variable names
+
+**Note**: ICON uses non-standard GRIB2 shortNames. The `eccodes-cosmo-resources` definitions package is required for cfgrib to decode them correctly.
+
+Legend — Accum: field is accumulated from model start; must be de-accumulated to per-hour values by differencing consecutive steps.
+
+#### Surface / 2D fields
+
+| Physical variable | ICON name | Accum | Notes |
+|---|---|---|---|
+| Wind U-component (10m) | `U_10M` | no | Combine with V → speed + direction |
+| Wind V-component (10m) | `V_10M` | no | |
+| Wind gusts (10m) | `VMAX_10M` | no | Max gust since last output step |
+| Temperature (2m) | `T_2M` | no | Kelvin |
+| Specific humidity (surface) | `QV` | no | Used to compute RH — see below |
+| Surface pressure | `PS` | no | Pascals |
+| QFF pressure | `PMSL` | no | Sea-level reduced (QFF convention) |
+| Precipitation | `TOT_PREC` | **yes** | De-accumulate to mm/h |
+| Sunshine duration | `DURSUN` | **yes** | De-accumulate; convert s → min/h |
+| Direct SW radiation | `ASWDIR_S` | **yes** | De-accumulate → W/m² mean over hour |
+| Diffuse SW radiation | `ASWDIFD_S` | **yes** | De-accumulate → W/m² mean over hour |
+| Total cloud cover | `CLCT` | no | % (0–100) |
+| Low cloud cover | `CLCL` | no | % |
+| Medium cloud cover | `CLCM` | no | % |
+| High cloud cover | `CLCH` | no | % |
+| Convective cloud base height | `HBAS_CON` | no | m AGL; 0 when no convective cloud |
+| Boundary layer height | `HPBL` | no | m AGL — thermal ceiling proxy |
+| Freezing level | `HZEROCL` | no | m ASL height of 0 °C isotherm |
+| Mixed-layer CAPE | `CAPE_ML` | no | J/kg — convective energy (0 = stable) |
+| Mixed-layer CIN | `CIN_ML` | no | J/kg — convective inhibition (negative) |
+
+#### Pressure-level / 3D fields (typeOfLevel = isobaricInhPa)
+
+| Physical variable | ICON name | Notes |
+|---|---|---|
+| Wind U-component | `U` | → compute speed + direction |
+| Wind V-component | `V` | |
+| Vertical wind speed | `W` | m/s; positive = updraft |
+
+#### De-accumulation
+
+For accumulated fields (`TOT_PREC`, `DURSUN`, `ASWDIR_S`, `ASWDIFD_S`), convert to per-step rates:
+
+```python
+# arr shape: (members, steps, lat, lon)
+rates = np.diff(arr, axis=1, prepend=0)  # step 0 value is the rate for that first hour
+```
+
+Divide by step length in seconds where a rate (W/m², mm/h) is needed. `DURSUN` is in seconds of sunshine per step → divide by step_seconds × 60 to get fraction, or convert to minutes.
+
+### Grid coordinates
+
+Downloaded GRIB2 forecast files do **not** include coordinate information. Grid coordinates (lat/lon) must be downloaded separately from the collection's static assets:
+
+- `horizontal_constants_icon-ch1-eps.grib2`
+- `horizontal_constants_icon-ch2-eps.grib2`
+
+Download once at container startup and cache in memory. Build the KD-tree from this file.
+
+### Ensemble member counts
+
+| Model | Members |
+|---|---|
+| ICON-CH1-EPS | 11 |
+| ICON-CH2-EPS | 21 |
+
+### How to get all ensemble members
+
+There is **no `forecast:member` search parameter**. A single `POST /search` with `forecast:perturbed: true` returns one GRIB2 file that contains all N members as separate GRIB2 messages (one message per member per variable). cfgrib reads them as a stacked xarray Dataset dimension `number`.
+
+Control run: `forecast:perturbed: false` → one message.
+
+### RELHUM_2M — compute from QV + T_2M + PS
+
+`RELHUM_2M` is not a published variable. Compute it from `QV`, `T_2M`, `PS` (all three are downloaded anyway):
+
+```python
+# Bolton formula (accuracy ±0.1% RH)
+import numpy as np
+
+def relative_humidity(qv_kg_kg: np.ndarray, t_k: np.ndarray, p_pa: np.ndarray) -> np.ndarray:
+    p_hpa = p_pa / 100.0
+    e = (qv_kg_kg * p_hpa) / (0.622 + qv_kg_kg)          # actual vapour pressure (hPa)
+    es = 6.112 * np.exp(17.67 * (t_k - 273.15) / (t_k - 29.65))  # saturation (hPa)
+    return np.clip(100.0 * e / es, 0, 100)
+```
+
+Download: `QV` (specific humidity, surface), `T_2M`, `PS`.
+
+### PMSL — assume QFF
+
+`PMSL` uses actual temperature reduction (QFF convention), consistent with MeteoSwiss operational synoptic practice and COSMO/ICON heritage. Not explicitly documented — if QFF/QNH distinction becomes critical, confirm with MeteoSwiss support.
+
+### eccodes-cosmo-resources setup
+
+```bash
+pip install eccodes-cosmo-resources-python  # bundles COSMO GRIB2 definition files
+```
+
+Call once at process startup before any cfgrib/xarray operations:
+
+```python
+import eccodes
+import eccodes_cosmo_resources
+
+vendor_path = eccodes.codes_definition_path()
+cosmo_path = eccodes_cosmo_resources.get_definitions_path()
+eccodes.codes_set_definitions_path(f"{cosmo_path}:{vendor_path}")
+```
+
+**No system package needed beyond `libeccodes-dev`** (already in Dockerfile). No env var required if using the Python API above.
+
+**Pinned versions** (from MeteoSwiss opendata-nwp-demos):
+- `eccodes==2.38.3`
+- `eccodes-cosmo-resources-python==2.38.3.1`
+- `cfgrib==0.9.15.0`
+
+---
+
 ## Altitude Level Mapping
 
 | Altitude (m ASL) | Pressure (hPa) |

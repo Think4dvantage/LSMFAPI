@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LSMFAPI — Accuracy Analysis</title>
+  <link rel="stylesheet" href="/static/shared.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>LSMFAPI</h1>
+    <nav>
+      <a href="/accuracy" class="active">Accuracy Analysis</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="card">
+      <div class="form-row">
+        <div class="form-group">
+          <label for="station-select">Station</label>
+          <select id="station-select">
+            <option value="">Loading stations…</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="date-from">From</label>
+          <input type="date" id="date-from">
+        </div>
+        <div class="form-group">
+          <label for="date-to">To</label>
+          <input type="date" id="date-to">
+        </div>
+        <div class="form-group">
+          <label for="variable-select">Variable</label>
+          <select id="variable-select">
+            <option value="wind_speed">Wind speed (10m)</option>
+            <option value="wind_gusts">Wind gusts (10m)</option>
+            <option value="wind_direction">Wind direction (10m)</option>
+            <option value="temperature">Temperature (2m)</option>
+            <option value="humidity">Relative humidity</option>
+            <option value="pressure_qff">Pressure QFF</option>
+            <option value="precipitation">Precipitation</option>
+          </select>
+        </div>
+        <button id="analyse-btn" disabled>Analyse</button>
+      </div>
+      <p id="form-error" class="error" style="margin-top:8px;display:none;"></p>
+    </div>
+
+    <div id="chart-card" class="card" style="display:none;">
+      <h2 style="font-size:14px;font-weight:600;margin-bottom:12px;" id="chart-title"></h2>
+      <div class="chart-container">
+        <canvas id="bias-chart"></canvas>
+      </div>
+    </div>
+
+    <div id="rmse-card" class="card" style="display:none;">
+      <h2 style="font-size:14px;font-weight:600;margin-bottom:12px;">RMSE Summary</h2>
+      <table id="rmse-table">
+        <thead>
+          <tr>
+            <th>Lead time (h)</th>
+            <th>RMSE</th>
+            <th>Mean bias</th>
+            <th>Sample size</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <p id="loading-msg" class="muted" style="display:none;">Loading…</p>
+  </main>
+
+  <script src="/static/index.js"></script>
+</body>
+</html>
