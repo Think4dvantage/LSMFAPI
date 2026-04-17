@@ -1,75 +1,97 @@
-# Resume Notes — 2026-04-16
+# Resume Notes — 2026-04-18
 
 ## Status
 
-Scaffold complete. All research done. No collector logic implemented yet — that is the next concrete coding task.
+Both collectors fully operational against live MeteoSwiss data. API serving real forecast data.
+Traefik routing working. Cache persistence implemented. Altitude winds moved to separate endpoint.
+Web GUI stations loading fixed (CORS proxy added).
 
 ## What Was Done This Session
 
-### Repo scaffold created
-Full project skeleton is in place and committed:
-- `pyproject.toml` (Poetry, all deps including `eccodes-cosmo-resources-python`)
-- `src/lsmfapi/` — full package structure with all modules as working skeletons
-- `Dockerfile` + `docker-compose.yml` + `docker-compose.dev.yml`
-- `static/` — accuracy GUI (HTML/CSS/JS)
-- `config.yml.example` updated to STAC collection IDs
+### Pipeline fixes (all landed, confirmed working)
 
-### MeteoSwiss STAC API confirmed
-- Search endpoint: `POST https://data.geo.admin.ch/api/stac/v1/search`
-- Collections: `ch.meteoschweiz.ogd-forecasting-icon-ch1` / `ch.meteoschweiz.ogd-forecasting-icon-ch2`
-- All ensemble members delivered in a single GRIB2 file (`forecast:perturbed: true`)
-- CH1-EPS: 11 members. CH2-EPS: 21 members.
-- Grid coordinates in separate `horizontal_constants_*.grib2` file (must download on startup)
-- Data availability window: 24h after publication
+**Asset key bug** — `_search_item_url` was looking for `.get("data")` on the assets dict; MeteoSwiss
+uses the filename as the asset key. Fixed to `next(iter(assets.values())).get("href")`.
 
-### Variable set expanded
-`ForecastPoint` expanded from 8 to 24 fields — radiation, cloud cover, boundary layer height, CAPE/CIN, freezing level, vertical wind per pressure level. Full variable table in `architecture.md`.
+**QV → TD_2M swap** — QV (specific humidity, 3D field, 80 vertical levels, ~80-100MB per file)
+replaced with TD_2M (2m dew point temperature, small surface field, ~5MB). RH now computed via
+Magnus formula in `_compute_rh_from_td(t_k, td_k)`. Saves ~30 min per collection run.
 
-### All four open questions resolved
-See `architecture.md` — RELHUM_2M (compute from QV+T+PS), PMSL=QFF, member enumeration, eccodes setup.
+**3D shape mismatch** — surf_array() now handles ndim==3 results by taking `r[:, -1, :]`
+(bottom model level). Was causing ValueError when any 3D variable slipped into surface processing.
 
-## Next Step
+**Progress logging** — counter `n/total` logged every 20 tasks and at completion.
 
-**Implement `IconCh1EpsCollector.collect()`** in `src/lsmfapi/collectors/icon_ch1_eps.py`.
+**Diagnostic summary** — after gather: `CH1 surface fetch: X/Y tasks returned data`.
 
-Before starting, verify the two unconfirmed shortNames by fetching the params CSV:
+**httpx/httpcore log spam** suppressed in `main.py`.
+
+### Architecture change: pressure_levels separated
+
+`pressure_levels: list[PressureLevelWinds]` removed from `ForecastPoint` / station response.
+Altitude winds now stored and served separately:
+
+- New models: `AltitudeWindsPoint`, `AltitudeWindsResponse` (in `models/forecast.py`)
+- New cache functions: `get_station_altitude_winds`, `set_station_altitude_winds` (in `database/cache.py`)
+- New endpoint: `GET /api/forecast/altitude-winds?station_id=&hours=`
+- Both CH1 and CH2 collectors build and cache altitude winds alongside the surface forecast
+
+### Cache persistence
+
+`database/cache.py` now persists the in-memory cache to `/app/data/cache.json`:
+- `load_cache()` — called at startup before scheduler; loads stale data so API is immediately usable
+- `save_cache()` — atomic write (`.tmp` → rename); called after each successful collection + on graceful shutdown
+- Volume mount `./data:/app/data` added to both `docker-compose.yml` and `docker-compose.dev.yml`
+- `./data` excluded from rsync in `LSMF-dev.ps1` (intentional — never overwrite remote cache)
+
+### Traefik fixes
+
+- `docker-compose.dev.yml` had `tls=true` but no `certresolver` → self-signed cert error. Added:
+  `traefik.http.routers.lsmfapi-dev.tls.certresolver=letsencrypt`
+- Added explicit port label: `traefik.http.services.lsmfapi-dev.loadbalancer.server.port=8000`
+- Startup was blocking (lifespan awaited full collection before yielding) → Traefik saw container
+  as "starting" / unhealthy. Fixed: initial collection now runs as `asyncio.create_task(_warm_cache())`
+  so FastAPI starts serving immediately; health checks pass; Traefik routes traffic.
+
+### Web GUI: stations CORS fix
+
+`index.js` was fetching Lenticularis directly from the browser → CORS blocked.
+Added `/api/stations` proxy endpoint in `accuracy.py` that calls Lenticularis server-side.
+Also fixed field names: `s.station_id`, `s.latitude`, `s.longitude` (was `s.id`, `s.lat`, `s.lon`).
+
+## Known Issues / Deferred
+
+- **`sunshine_minutes` wrong for CH2 first step** — h=30 is the first CH2 horizon; the accumulated
+  value from model start (30h of sunshine) is used as the delta, not 3h. Needs special-casing for
+  the first step: treat the accumulated value as the per-step value, or fetch h=27 to diff against.
+- **`cin: -999.9`** — ICON fill value for "no convection present". Should map to `null`.
+  Fix: clip `CIN_ML` to `None` where value < -900.
+- **U/V/W pressure-level data all null** — probe downloads succeed but values are null in response.
+  Not yet investigated. May be eccodes level-type mismatch or STAC search returning no results.
+- **`fetchActuals` / `fetchForecasts` in index.js** still call Lenticularis directly from browser
+  → will CORS-fail when analysis is run. Need same proxy treatment as stations.
+- **Wind-grid endpoint** (`GET /api/forecast/wind-grid`) is a stub — `set_grid_forecast` is never
+  called. Not yet implemented.
+
+## Key Files
+
 ```
-GET https://data.geo.admin.ch/api/stac/v1/collections/ch.meteoschweiz.ogd-forecasting-icon-ch1
+src/lsmfapi/collectors/icon_ch1_eps.py   — CH1 collector (all helpers live here)
+src/lsmfapi/collectors/icon_ch2_eps.py   — CH2 collector (imports helpers from CH1)
+src/lsmfapi/models/forecast.py           — all Pydantic models incl. AltitudeWindsResponse
+src/lsmfapi/database/cache.py            — in-memory cache + save/load persistence
+src/lsmfapi/scheduler.py                 — APScheduler + _warm_cache background task
+src/lsmfapi/api/routers/forecast.py      — /api/forecast/station + /api/forecast/altitude-winds
+src/lsmfapi/api/routers/accuracy.py      — accuracy GUI + /api/stations proxy
+src/lsmfapi/api/main.py                  — lifespan: load_cache → scheduler → save_cache on shutdown
+static/index.js                          — accuracy GUI frontend
+docker-compose.yml                       — base compose (data volume mount)
+docker-compose.dev.yml                   — dev overlay (Traefik labels, live src mount, data volume)
+scripts/LSMF-dev.ps1                     — SSH deploy script (deploy/sync/restart/logs/exec)
+config.yml                               — meteoswiss URLs, lenticularis base_url, scheduler intervals
 ```
-Look for a CSV asset in the response and confirm `HPBL` (BLH?) and `HZEROCL`.
 
-Then implement in this order:
-1. `_download_grid_constants()` — fetch `horizontal_constants_icon-ch1-eps.grib2`, build KD-tree, cache as module-level singleton
-2. `_fetch_station_list()` — GET `{lenticularis.base_url}/api/stations`, return list of `{lat, lon, elevation}` dicts
-3. `_stac_search(collection, ref_dt, variable, horizon, perturbed)` → returns GRIB2 download URL
-4. `_download_all_steps(variable, ref_dt)` → loops horizons P0DT00H to P0DT30H, returns stacked xarray
-5. `_deaccumulate(arr)` — np.diff for TOT_PREC, DURSUN, ASWDIR_S, ASWDIFD_S
-6. `_compute_rh(qv, t_k, p_pa)` — Bolton formula (already documented in architecture.md)
-7. Main `collect()` — assembles ForecastPoint per station per valid_time, calls `set_station_forecast()`
+## Context Files to Read
 
-`IconCh2EpsCollector` is identical except collection ID, member count (21), and horizon range (30h–120h).
-
-## Open Questions
-
-- [ ] Confirm `HPBL` shortName (may be `BLH`) — check params CSV
-- [ ] Confirm `HZEROCL` shortName — check params CSV
-- [ ] What are the exact Lenticularis API endpoints for station list, actuals, and forecast archive? (needed by accuracy GUI JS and by collectors to fetch station list)
-
-## Key Decisions Made
-
-- **STAC search, not static URL**: Each variable+step is discovered via POST to `/search`. No filename construction.
-- **One GRIB2 file = all members**: `forecast:perturbed: true` gives a single file with all member messages stacked. cfgrib reads `number` dimension.
-- **RELHUM_2M not published**: Compute from QV + T_2M + PS using Bolton formula.
-- **PMSL = QFF**: Assumed, consistent with MeteoSwiss operational practice. Not formally documented.
-- **eccodes-cosmo-resources-python**: pip-only, no extra apt package. Call `codes_set_definitions_path` at startup (`_eccodes.py`).
-- **Extended variable set**: ForecastPoint now includes radiation, cloud, thermics/convection, vertical wind — all as EnsembleValue (probable/min/max).
-
-## Context
-
-Read these files to get up to speed:
-- `.ai/instructions/01-project-overview.md` — tech stack, data flow
-- `.ai/context/architecture.md` — STAC API, variable names, de-accumulation, eccodes setup
-- `.ai/context/features.md` — v0.1 scope (expanded variable set)
-- `src/lsmfapi/models/forecast.py` — full ForecastPoint/GridForecastPoint schema
-- `src/lsmfapi/collectors/base.py` — BaseCollector with `download()` helper
-- `src/lsmfapi/_eccodes.py` — eccodes definitions setup (called in lifespan)
+- `.ai/context/architecture.md` — STAC API, variables, eccodes, altitude mapping, API contracts
+- `.ai/context/features.md` — shipped vs backlog

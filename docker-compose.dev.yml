@@ -3,6 +3,7 @@ services:
     volumes:
       - ./src:/app/src:ro,z
       - ./static:/app/static:ro,z
+      - ./data:/app/data
     environment:
       - PYTHONPYCACHEPREFIX=/tmp/pycache
     networks:
@@ -12,6 +13,8 @@ services:
       - "traefik.http.routers.lsmfapi-dev.rule=Host(`lsmfapi-dev.lg4.ch`)"
       - "traefik.http.routers.lsmfapi-dev.entrypoints=websecure"
       - "traefik.http.routers.lsmfapi-dev.tls=true"
+      - "traefik.http.routers.lsmfapi-dev.tls.certresolver=letsencrypt"
+      - "traefik.http.services.lsmfapi-dev.loadbalancer.server.port=8000"
       - "traefik.docker.network=proxy"
 
 networks:

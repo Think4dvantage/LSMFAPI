@@ -12,7 +12,11 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:ethz.ch)",
       "WebFetch(domain:www.cosmo-model.org)",
-      "WebFetch(domain:www.meteoswiss.admin.ch)"
+      "WebFetch(domain:www.meteoswiss.admin.ch)",
+      "Bash(curl *)",
+      "WebFetch(domain:opendatadocs.meteoschweiz.ch)",
+      "Bash(python3 *)",
+      "Bash(python *)"
     ]
   }
 }

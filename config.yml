@@ -1,0 +1,13 @@
+meteoswiss:
+  stac_base_url: "https://data.geo.admin.ch/api/stac/v1"
+  ch1eps_collection: "ch.meteoschweiz.ogd-forecasting-icon-ch1"
+  ch2eps_collection: "ch.meteoschweiz.ogd-forecasting-icon-ch2"
+
+lenticularis:
+  base_url: "https://lenti-dev.lg4.ch"
+
+scheduler:
+  ch1eps_interval_hours: 3
+  ch1eps_jitter_seconds: 600
+  ch2eps_interval_hours: 6
+  ch2eps_jitter_seconds: 600

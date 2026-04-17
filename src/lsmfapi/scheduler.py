@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -6,6 +7,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from lsmfapi.collectors.icon_ch1_eps import IconCh1EpsCollector
 from lsmfapi.collectors.icon_ch2_eps import IconCh2EpsCollector
 from lsmfapi.config import get_config
+from lsmfapi.database.cache import save_cache
 
 logger = logging.getLogger(__name__)
 
@@ -13,9 +15,16 @@ _ch1_collector = IconCh1EpsCollector()
 _ch2_collector = IconCh2EpsCollector()
 
 
+async def _warm_cache() -> None:
+    """Run CH1 then CH2 once at startup to fill the cache. Sequential to avoid overloading downloads."""
+    await _run_ch1eps()
+    await _run_ch2eps()
+
+
 async def _run_ch1eps() -> None:
     try:
         await _ch1_collector.collect()
+        save_cache()
     except NotImplementedError as e:
         logger.warning("CH1-EPS collector not yet implemented: %s", e)
     except Exception:
@@ -25,6 +34,7 @@ async def _run_ch1eps() -> None:
 async def _run_ch2eps() -> None:
     try:
         await _ch2_collector.collect()
+        save_cache()
     except NotImplementedError as e:
         logger.warning("CH2-EPS collector not yet implemented: %s", e)
     except Exception:
@@ -54,9 +64,8 @@ class CollectorScheduler:
             id="collect_ch2eps",
         )
         self._scheduler.start()
-        logger.info("Scheduler started — warming cache")
-        await _run_ch1eps()
-        await _run_ch2eps()
+        logger.info("Scheduler started — warming cache in background")
+        asyncio.create_task(_warm_cache())
 
     def shutdown(self) -> None:
         self._scheduler.shutdown(wait=False)

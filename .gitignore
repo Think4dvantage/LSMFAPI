@@ -1,5 +1,4 @@
 # Project-specific secrets and local state
-config.yml
 lsmfapi.db
 data/
 

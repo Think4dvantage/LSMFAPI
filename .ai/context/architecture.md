@@ -27,18 +27,40 @@ _grid_cache: dict[str, GridResponse] = {}
 - Same lifecycle as station cache
 - 171 grid points × 9 altitude levels
 
+### Altitude winds cache
+
+```python
+_altitude_winds_cache: dict[str, AltitudeWindsResponse] = {}
+# key: station_id
+```
+
+Pressure-level wind data (U/V/W at 9 altitude bands) is stored separately from the surface forecast.
+Populated alongside `_station_cache` after each collection run.
+
 ### Cache module interface
 
 ```python
 # database/cache.py
 def get_station_forecast(station_key: str) -> ForecastResponse | None: ...
 def set_station_forecast(station_key: str, data: ForecastResponse) -> None: ...
+def get_station_altitude_winds(station_key: str) -> AltitudeWindsResponse | None: ...
+def set_station_altitude_winds(station_key: str, data: AltitudeWindsResponse) -> None: ...
 def get_grid_forecast(date: str, level_m: int) -> GridResponse | None: ...
 def set_grid_forecast(date: str, level_m: int, data: GridResponse) -> None: ...
-def cache_stats() -> dict: ...   # keys count, last_populated_at — for health/debug
+def save_cache() -> None: ...   # atomic write to /app/data/cache.json
+def load_cache() -> None: ...   # restore all caches from /app/data/cache.json on startup
+def cache_stats() -> dict: ...  # keys count, last_populated_at — for health/debug
 ```
 
 All reads and writes go through these functions so the backing store can be swapped (e.g. to Redis) without touching router code.
+
+### Cache persistence
+
+`/app/data/cache.json` is written after every successful collection and on graceful shutdown.
+On container startup, `load_cache()` restores all three caches before the scheduler fires —
+the API serves stale-but-valid data immediately while the background warm-up runs.
+Volume mount: `./data:/app/data` (in both compose files). The `./data` directory is excluded
+from the rsync deploy so the remote cache is never overwritten by a deploy.
 
 ---
 
@@ -111,8 +133,7 @@ Legend — Accum: field is accumulated from model start; must be de-accumulated 
 | Wind V-component (10m) | `V_10M` | no | |
 | Wind gusts (10m) | `VMAX_10M` | no | Max gust since last output step |
 | Temperature (2m) | `T_2M` | no | Kelvin |
-| Specific humidity (surface) | `QV` | no | Used to compute RH — see below |
-| Surface pressure | `PS` | no | Pascals |
+| Dew point temperature (2m) | `TD_2M` | no | Used to compute RH — see below |
 | QFF pressure | `PMSL` | no | Sea-level reduced (QFF convention) |
 | Precipitation | `TOT_PREC` | **yes** | De-accumulate to mm/h |
 | Sunshine duration | `DURSUN` | **yes** | De-accumulate; convert s → min/h |
@@ -169,22 +190,19 @@ There is **no `forecast:member` search parameter**. A single `POST /search` with
 
 Control run: `forecast:perturbed: false` → one message.
 
-### RELHUM_2M — compute from QV + T_2M + PS
+### RELHUM_2M — compute from TD_2M + T_2M
 
-`RELHUM_2M` is not a published variable. Compute it from `QV`, `T_2M`, `PS` (all three are downloaded anyway):
+`RELHUM_2M` is not a published variable. Compute from `TD_2M` (dew point) and `T_2M` via Magnus formula.
+`TD_2M` is a small surface field (~5MB); this replaced the earlier `QV + PS` approach which required
+downloading a 3D field (~80–100MB, all model vertical levels).
 
 ```python
-# Bolton formula (accuracy ±0.1% RH)
-import numpy as np
-
-def relative_humidity(qv_kg_kg: np.ndarray, t_k: np.ndarray, p_pa: np.ndarray) -> np.ndarray:
-    p_hpa = p_pa / 100.0
-    e = (qv_kg_kg * p_hpa) / (0.622 + qv_kg_kg)          # actual vapour pressure (hPa)
-    es = 6.112 * np.exp(17.67 * (t_k - 273.15) / (t_k - 29.65))  # saturation (hPa)
-    return np.clip(100.0 * e / es, 0, 100)
+def _compute_rh_from_td(t_k: np.ndarray, td_k: np.ndarray) -> np.ndarray:
+    t_c  = t_k  - 273.15
+    td_c = td_k - 273.15
+    rh = 100.0 * np.exp(17.625 * td_c / (243.04 + td_c)) / np.exp(17.625 * t_c / (243.04 + t_c))
+    return np.clip(rh, 0.0, 100.0)
 ```
-
-Download: `QV` (specific humidity, surface), `T_2M`, `PS`.
 
 ### PMSL — assume QFF
 
@@ -232,13 +250,51 @@ eccodes.codes_set_definitions_path(f"{cosmo_path}:{vendor_path}")
 
 ---
 
+## Lenticularis Station API
+
+Collectors fetch the station list from Lenticularis before every collection run:
+
+```
+GET https://lenticularis.lg4.ch/api/stations        # full list
+GET https://lenticularis.lg4.ch/api/stations?network=...
+GET https://lenticularis.lg4.ch/api/stations?canton=...
+```
+
+No authentication required (public endpoint). Response is a JSON array:
+
+```json
+[
+  {
+    "station_id": "INT-001",
+    "name": "Interlaken",
+    "network": "...",
+    "latitude": 46.68,
+    "longitude": 7.86,
+    "elevation": 580,
+    "canton": "BE",
+    "member_ids": [...]
+  }
+]
+```
+
+`station_id` is the canonical key used in the LSMFAPI forecast cache and in all API responses.
+
+---
+
 ## API Contracts
 
 No authentication. All endpoints are open — access is controlled at the network/container level.
 
 ### Forecast
-- `GET /api/forecast/station` — `?lat=&lon=&elevation=&hours=` → hourly ForecastResponse (probable + min + max per variable, 120h max); served from in-memory cache
-- `GET /api/forecast/wind-grid` — `?date=YYYY-MM-DD&level_m=` → GridResponse (171 grid points, frames with ws/ws_min/ws_max/wd arrays); served from in-memory cache
+- `GET /api/forecast/station` — `?station_id=&hours=` → hourly ForecastResponse (probable + min + max per variable, 120h max); served from in-memory cache. Does NOT include pressure-level winds.
+- `GET /api/forecast/altitude-winds` — `?station_id=&hours=` → AltitudeWindsResponse; per-hour wind speed, direction, vertical wind at 9 altitude bands (500–5000m ASL); served from in-memory cache
+- `GET /api/forecast/wind-grid` — `?date=YYYY-MM-DD&level_m=` → GridResponse (stub — `set_grid_forecast` not yet called by any collector)
+
+### Accuracy GUI + proxy
+- `GET /accuracy` — serves `static/index.html`
+- `GET /api/meta` — returns `{"lenticularis_base_url": "..."}` for JS use
+- `GET /api/stations` — **proxy** to `{lenticularis.base_url}/api/stations`; avoids browser CORS.
+  Returns the Lenticularis station array as-is (fields: `station_id`, `name`, `latitude`, `longitude`, `elevation`, ...)
 
 ### Recipes (v0.2)
 - `GET /api/recipes` → list of recipes

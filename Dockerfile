@@ -10,10 +10,11 @@ RUN pip install --no-cache-dir poetry \
     && poetry config virtualenvs.create false
 
 COPY pyproject.toml poetry.lock* ./
-RUN poetry install --only main --no-interaction --no-ansi
+RUN poetry install --only main --no-root --no-interaction --no-ansi
 
 COPY src/ ./src/
 COPY static/ ./static/
+RUN poetry install --only main --no-interaction --no-ansi
 
 EXPOSE 8000
 

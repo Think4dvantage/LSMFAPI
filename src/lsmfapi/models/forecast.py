@@ -1,12 +1,20 @@
+import math
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class EnsembleValue(BaseModel):
-    probable: float  # median across all members × runs
-    min: float       # absolute minimum
-    max: float       # absolute maximum
+    probable: float | None  # median across all members × runs
+    min: float | None       # absolute minimum
+    max: float | None       # absolute maximum
+
+    @field_validator("probable", "min", "max", mode="before")
+    @classmethod
+    def nan_to_none(cls, v: object) -> float | None:
+        if isinstance(v, float) and math.isnan(v):
+            return None
+        return v  # type: ignore[return-value]
 
 
 class PressureLevelWinds(BaseModel):
@@ -48,9 +56,6 @@ class ForecastPoint(BaseModel):
     cape: EnsembleValue                   # J/kg — convective energy; >500 = significant (CAPE_ML)
     cin: EnsembleValue                    # J/kg — convective inhibition; negative (CIN_ML)
 
-    # --- Pressure-level winds (9 altitude bands: 500–5000m ASL) ---
-    pressure_levels: list[PressureLevelWinds]
-
 
 class ForecastResponse(BaseModel):
     station_lat: float
@@ -58,6 +63,19 @@ class ForecastResponse(BaseModel):
     station_elevation: int
     generated_at: datetime
     hours: list[ForecastPoint]
+
+
+class AltitudeWindsPoint(BaseModel):
+    valid_time: datetime
+    levels: list[PressureLevelWinds]   # 9 altitude bands: 500–5000m ASL
+
+
+class AltitudeWindsResponse(BaseModel):
+    station_lat: float
+    station_lon: float
+    station_elevation: int
+    generated_at: datetime
+    hours: list[AltitudeWindsPoint]
 
 
 class GridForecastPoint(BaseModel):

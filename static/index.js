@@ -16,14 +16,14 @@ async function init() {
 async function loadStations() {
   const select = document.getElementById("station-select");
   try {
-    const stations = await fetch(`${lenticularisBaseUrl}/api/stations`).then(r => r.json());
+    const stations = await fetch("/api/stations").then(r => r.json());
     select.innerHTML = stations
-      .map(s => `<option value="${s.id}" data-lat="${s.lat}" data-lon="${s.lon}" data-elev="${s.elevation}">${s.name}</option>`)
+      .map(s => `<option value="${s.station_id}" data-lat="${s.latitude}" data-lon="${s.longitude}" data-elev="${s.elevation ?? 0}">${s.name ?? s.station_id}</option>`)
       .join("");
     document.getElementById("analyse-btn").disabled = false;
   } catch (err) {
     select.innerHTML = `<option value="">Failed to load stations</option>`;
-    showError(`Could not load stations from Lenticularis: ${err.message}`);
+    showError(`Could not load stations: ${err.message}`);
   }
 }
 
