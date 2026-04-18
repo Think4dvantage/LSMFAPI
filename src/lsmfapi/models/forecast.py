@@ -1,99 +1,133 @@
 import math
+from dataclasses import dataclass
 from datetime import datetime
 
+import numpy as np
 from pydantic import BaseModel, field_validator
 
 
 class EnsembleValue(BaseModel):
-    probable: float | None  # median across all members × runs
-    min: float | None       # absolute minimum
-    max: float | None       # absolute maximum
+    """Internal — used during collection, not in API responses."""
+    probable: float | None
+    min: float | None
+    max: float | None
 
     @field_validator("probable", "min", "max", mode="before")
     @classmethod
     def nan_to_none(cls, v: object) -> float | None:
         if isinstance(v, float) and math.isnan(v):
             return None
-        return v  # type: ignore[return-value]
+        return v
 
 
-class PressureLevelWinds(BaseModel):
-    altitude_m: int           # m ASL (see altitude level mapping in architecture.md)
-    wind_speed: EnsembleValue
-    wind_direction: EnsembleValue
-    vertical_wind: EnsembleValue  # m/s — positive = updraft, negative = downdraft
+# ---------- Station forecast ----------
 
-
-class ForecastPoint(BaseModel):
+class StationForecastHour(BaseModel):
     valid_time: datetime
 
-    # --- Surface winds ---
-    wind_speed: EnsembleValue        # m/s at 10m
-    wind_gusts: EnsembleValue        # m/s at 10m (max gust in step)
-    wind_direction: EnsembleValue    # degrees (0/360 = N, 90 = E)
-
-    # --- Surface conditions ---
-    temperature: EnsembleValue       # °C
-    humidity: EnsembleValue          # % relative humidity
-    pressure_qff: EnsembleValue      # hPa reduced to sea level (QFF)
-    precipitation: EnsembleValue     # mm/h (de-accumulated from TOT_PREC)
-
-    # --- Radiation ---
-    solar_direct: EnsembleValue      # W/m² mean over hour (de-accumulated ASWDIR_S)
-    solar_diffuse: EnsembleValue     # W/m² mean over hour (de-accumulated ASWDIFD_S)
-    sunshine_minutes: EnsembleValue  # minutes of sunshine in the hour (de-accumulated DURSUN)
-
-    # --- Cloud ---
-    cloud_cover_total: EnsembleValue      # % (0–100)
-    cloud_cover_low: EnsembleValue        # %
-    cloud_cover_mid: EnsembleValue        # %
-    cloud_cover_high: EnsembleValue       # %
-    cloud_base_convective: EnsembleValue  # m AGL; 0 when no convective cloud (HBAS_CON)
-
-    # --- Thermics / convection ---
-    boundary_layer_height: EnsembleValue  # m AGL — proxy for thermal ceiling (HPBL)
-    freezing_level: EnsembleValue         # m ASL — height of 0 °C isotherm (HZEROCL)
-    cape: EnsembleValue                   # J/kg — convective energy; >500 = significant (CAPE_ML)
-    cin: EnsembleValue                    # J/kg — convective inhibition; negative (CIN_ML)
+    wind_speed: float | None        # km/h at 10 m
+    wind_speed_min: float | None
+    wind_speed_max: float | None
+    wind_gust: float | None         # km/h at 10 m (max in step)
+    wind_gust_min: float | None
+    wind_gust_max: float | None
+    wind_direction: float | None    # degrees, met. convention (0=N, 90=E)
+    wind_direction_min: float | None
+    wind_direction_max: float | None
+    temperature: float | None       # °C
+    temperature_min: float | None
+    temperature_max: float | None
+    humidity: float | None          # %
+    humidity_min: float | None
+    humidity_max: float | None
+    pressure_qff: float | None      # hPa sea-level
+    pressure_qff_min: float | None
+    pressure_qff_max: float | None
+    precipitation: float | None     # mm
+    precipitation_min: float | None
+    precipitation_max: float | None
 
 
-class ForecastResponse(BaseModel):
-    station_lat: float
-    station_lon: float
-    station_elevation: int
-    generated_at: datetime
-    hours: list[ForecastPoint]
+class StationForecastResponse(BaseModel):
+    """GET /api/forecast/station — errors: 404 unknown station, 503 cache warming."""
+    station_id: str
+    init_time: datetime     # model run initialisation time UTC
+    model: str
+    source: str
+    forecast: list[StationForecastHour]
 
 
-class AltitudeWindsPoint(BaseModel):
+# ---------- Altitude winds ----------
+
+class AltitudeWindLevel(BaseModel):
+    level_m: int
+
+    wind_speed: float | None        # km/h
+    wind_speed_min: float | None
+    wind_speed_max: float | None
+    wind_direction: float | None    # degrees
+    wind_direction_min: float | None
+    wind_direction_max: float | None
+    vertical_wind: float | None     # m/s, positive = upward
+    vertical_wind_min: float | None
+    vertical_wind_max: float | None
+
+
+class AltitudeWindsProfile(BaseModel):
     valid_time: datetime
-    levels: list[PressureLevelWinds]   # 9 altitude bands: 500–5000m ASL
+    levels: list[AltitudeWindLevel]
 
 
 class AltitudeWindsResponse(BaseModel):
-    station_lat: float
-    station_lon: float
-    station_elevation: int
-    generated_at: datetime
-    hours: list[AltitudeWindsPoint]
+    """GET /api/forecast/altitude-winds — errors: 404 unknown station, 503 cache warming."""
+    station_id: str
+    init_time: datetime
+    model: str
+    source: str
+    profiles: list[AltitudeWindsProfile]
 
 
-class GridForecastPoint(BaseModel):
+# ---------- Grid forecast ----------
+
+class GridPoint(BaseModel):
     lat: float
     lon: float
-    ws: list[float]      # probable wind speed per hour (m/s)
-    ws_min: list[float]
-    ws_max: list[float]
-    wd: list[float]      # probable wind direction per hour (degrees)
-    wd_min: list[float]
-    wd_max: list[float]
-    wv: list[float]      # probable vertical wind per hour (m/s; positive = updraft)
-    wv_min: list[float]
-    wv_max: list[float]
 
 
-class GridResponse(BaseModel):
-    date: str       # YYYY-MM-DD
-    level_m: int    # altitude level in m ASL
-    generated_at: datetime
-    points: list[GridForecastPoint]
+class GridFrame(BaseModel):
+    valid_time: datetime
+    ws: list[float | None]  # km/h, parallel to grid
+    wd: list[float | None]  # degrees, parallel to grid
+    rh: list[float | None]  # % surface relative humidity, parallel to grid
+
+
+class GridForecastResponse(BaseModel):
+    """GET /api/forecast/grid — errors: 400 bad params, 503 cache warming."""
+    init_time: datetime
+    model: str
+    stride_km: int
+    grid: list[GridPoint]
+    frames: list[GridFrame]
+
+
+# ---------- Internal: grid wind cache (not persisted) ----------
+
+@dataclass
+class GridWindCache:
+    """Pre-sampled 1 km regular grid over the default Switzerland bbox.
+
+    lats/lons are row-major (lat descending, lon ascending).
+    ws/wd keyed by level_m → (n_frames, N) arrays, km/h / degrees.
+    """
+    init_time: datetime
+    lats: np.ndarray        # shape (N,)
+    lons: np.ndarray        # shape (N,)
+    n_lat: int
+    n_lon: int
+    lat_max: float
+    lon_min: float
+    step_deg: float
+    valid_times: list[datetime]
+    ws: dict[int, np.ndarray]   # level_m → (n_frames, N)
+    wd: dict[int, np.ndarray]   # level_m → (n_frames, N)
+    rh: np.ndarray              # (n_frames, N) surface relative humidity %

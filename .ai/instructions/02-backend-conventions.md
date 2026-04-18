@@ -2,149 +2,112 @@
 
 ## New API Router
 
-Create `src/lsmfapi/api/routers/<domain>.py`, register it in `main.py`.
+Create `src/[package]/api/routers/<domain>.py`, register it in `main.py`.
 
 ```python
-# src/lsmfapi/api/routers/forecast.py
-router = APIRouter(prefix="/api/forecast", tags=["forecast"])
+# src/[package]/api/routers/widgets.py
+router = APIRouter(prefix="/api/widgets", tags=["widgets"])
 
-@router.get("/station")
-async def station_forecast(
-    lat: float, lon: float, elevation: int, hours: int = 120,
-):
+@router.get("")
+def list_widgets(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ...
 ```
 
 ```python
 # main.py
-from lsmfapi.api.routers import forecast as forecast_router
-app.include_router(forecast_router.router)
+from [package].api.routers import widgets as widgets_router
+app.include_router(widgets_router.router)
 ```
 
 Add a page route in the same router file if a new HTML page is needed:
 
 ```python
-@router.get("/accuracy-page", include_in_schema=False)
-async def accuracy_page():
-    return FileResponse("static/index.html")
+@router.get("/widgets-page", include_in_schema=False)
+async def widgets_page():
+    return FileResponse("static/widgets.html")
 ```
 
 ---
 
-## New SQLite Table
+## New SQLite Table & Migrations
 
-Add ORM model in `models.py`:
+### 1. Define ORM Model
+Add the ORM model in `models.py`:
 
 ```python
-class Recipe(Base):
-    __tablename__ = "recipes"
+class Widget(Base):
+    __tablename__ = "widgets"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     ...
 ```
 
-New tables are created automatically by `Base.metadata.create_all()` in `db.py`. No migration needed.
+### 2. Create Migration Script
+Create a new `.sql` file in `src/[package]/database/migrations/` using a sequential prefix:
 
-For **new columns on existing tables**, add to `_run_column_migrations()` in `db.py`:
+`0001_initial_schema.sql` → `0002_add_widgets.sql` → `0003_add_user_bio.sql`
+
+Example migration:
+```sql
+CREATE TABLE IF NOT EXISTS widgets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### 3. Implementation Logic (db.py)
+The `init_db()` function in `db.py` must track and apply these scripts using a `_migrations` table. Never skip migrations — SQLAlchemy's `Base.metadata.create_all()` is only for initial bootstrap and does not handle schema drift.
+
+#### SQLite WAL Mode
+To support concurrent writes from collectors and reads from the API, always enable **Write-Ahead Logging (WAL)** mode on the SQLite connection:
 
 ```python
-if "new_col" not in cols:
-    conn.execute(text("ALTER TABLE existing_table ADD COLUMN new_col TEXT"))
+def init_db(engine):
+    with engine.connect() as conn:
+        conn.execute(text("PRAGMA journal_mode=WAL;"))
+        run_migrations(conn)
+```
+
+```python
+def run_migrations(conn):
+    conn.execute(text("CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY)"))
+    applied = {row[0] for row in conn.execute(text("SELECT filename FROM _migrations"))}
+    
+    migration_dir = Path(__file__).parent / "migrations"
+    for sql_file in sorted(migration_dir.glob("*.sql")):
+        if sql_file.name not in applied:
+            with open(sql_file) as f:
+                conn.execute(text(f.read()))
+            conn.execute(text("INSERT INTO _migrations (filename) VALUES (:f)"), {"f": sql_file.name})
     conn.commit()
 ```
 
-**Always make migrations idempotent** — check `PRAGMA table_info` first. Never skip `_run_column_migrations` when adding columns; SQLAlchemy's `create_all` does not alter existing tables.
+---
+
+## Testing Conventions
+
+See `06-testing-conventions.md` for the full strategy.
+- **Backend**: Pytest in `tests/backend/`. Use `httpx.AsyncClient`.
+- **Frontend**: Playwright in `tests/frontend/`.
 
 ---
 
-## Forecast Cache
+## New InfluxDB Query
 
-All forecast reads and writes go through `database/cache.py`. Never access `_station_cache` or `_grid_cache` directly from routers or collectors — always use the module-level getter/setter functions:
-
-```python
-from lsmfapi.database.cache import get_station_forecast, set_station_forecast
-
-# In a collector, after computing:
-set_station_forecast("46.68_7.86_580", forecast_response)
-
-# In a router:
-data = get_station_forecast("46.68_7.86_580")
-if data is None:
-    raise HTTPException(status_code=503, detail="Forecast not yet available")
-```
-
-This keeps the backing store swappable without touching router or collector code.
+Add a method to `InfluxClient` in `influx.py`. Keep Flux query strings inside the method. Return plain Python dicts/lists (no ORM objects).
 
 ---
 
-## MeteoSwiss STAC API — File Discovery
+## Auth Dependencies
 
-Files are not at predictable URLs. Each variable+step must be discovered via POST:
+Import from `[package].api.dependencies`:
 
-```python
-import httpx
+| Dependency | Who passes |
+|---|---|
+| `get_current_user` | Any logged-in user |
+| `require_admin` | `admin` only |
 
-async def stac_search(
-    base_url: str, collection: str, ref_dt: str, variable: str,
-    horizon_iso: str, perturbed: bool = True
-) -> str:
-    """Returns the GRIB2 download URL for one variable, one step."""
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            f"{base_url}/search",
-            json={
-                "collections": [collection],
-                "forecast:reference_datetime": ref_dt,   # e.g. "2025-03-12T12:00:00Z"
-                "forecast:variable": variable,            # e.g. "U_10M"
-                "forecast:perturbed": perturbed,
-                "forecast:horizon": horizon_iso,          # e.g. "P0DT06H00M00S"
-            },
-        )
-        r.raise_for_status()
-        return r.json()["features"][0]["assets"]["data"]["href"]
-```
-
-`forecast:perturbed: true` → one GRIB2 file containing all N members (11 for CH1-EPS, 21 for CH2-EPS) as stacked GRIB2 messages. cfgrib reads the `number` dimension.
-
-**Data availability window**: 24 hours from publication. Always search for the most recent completed run.
-
----
-
-## GRIB2 Parsing (Collectors)
-
-Use `cfgrib` + `xarray` to open GRIB2 files. Each collector downloads a GRIB2 file via `httpx` (async), saves it to a temp path, then opens it with xarray:
-
-```python
-import xarray as xr
-import cfgrib
-
-ds = xr.open_dataset(path, engine="cfgrib", backend_kwargs={"filter_by_keys": {"shortName": "10u"}})
-```
-
-Use `scipy.spatial.KDTree` for nearest-grid-point lookup:
-
-```python
-from scipy.spatial import KDTree
-tree = KDTree(list(zip(lats.ravel(), lons.ravel())))
-dist, idx = tree.query([target_lat, target_lon])
-```
-
-Keep KD-trees as module-level singletons (built once per collector run, not per query).
-
----
-
-## Ensemble Statistics
-
-All ensemble computation lives in `services/ensemble.py`. It receives a list of scalar values (all members × all runs for a given variable + valid_time) and returns `{probable: median, min: min, max: max}`.
-
-Wind direction uses circular statistics — do not use plain median/min/max for angles:
-
-```python
-import numpy as np
-
-def circular_median(angles_deg: list[float]) -> float:
-    rad = np.deg2rad(angles_deg)
-    return float(np.rad2deg(np.arctan2(np.nanmedian(np.sin(rad)), np.nanmedian(np.cos(rad)))) % 360)
-```
+[Add additional role-based dependencies here as they are introduced.]
 
 ---
 
@@ -152,23 +115,11 @@ def circular_median(angles_deg: list[float]) -> float:
 
 Add new keys to `config.py` Pydantic models **and** to `config.yml.example`. Never read `os.environ` directly — always go through `get_config()`.
 
-Key config sections:
-- `meteoswiss.ch1eps_url` — base URL for ICON-CH1-EPS GRIB2 downloads
-- `meteoswiss.ch2eps_url` — base URL for ICON-CH2-EPS GRIB2 downloads
-- `lenticularis.base_url` — Lenticularis API base URL (station list + accuracy GUI)
-- `scheduler.*` — Job intervals and jitter
-
 ---
 
 ## Scheduler Jobs
 
 Add to `CollectorScheduler` in `scheduler.py`. Use `AsyncIOScheduler` + `IntervalTrigger`. Track health in `_collector_health` dict.
-
-| Job | Trigger | Notes |
-|---|---|---|
-| `collect_ch1eps` | Every 3h (jitter ±10 min) | Downloads + parses latest CH1-EPS run, writes to InfluxDB |
-| `collect_ch2eps` | Every 6h | Downloads + parses latest CH2-EPS run (30h–120h slice) |
-| `purge_old_forecasts` | Daily 01:00 | Deletes InfluxDB records older than 7 days |
 
 ---
 
@@ -180,5 +131,5 @@ Add to `CollectorScheduler` in `scheduler.py`. Use `AsyncIOScheduler` + `Interva
 - **SQLAlchemy 2.0 style** — use `select()`, not legacy `query()`.
 - **One router per domain** — never put all routes in `main.py`.
 - **Abstract base classes** (ABC + `@abstractmethod`) for collectors.
-- **Log** all collection events and errors with the standard `logging` module.
-- **No print statements** in production code.
+- **Log extensively** — startup sequence, every request, every job run, every config value loaded. See `08-operability.md` for the full doctrine.
+- **No print statements** in production code — always use the `logging` module.

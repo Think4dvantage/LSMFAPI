@@ -27,6 +27,7 @@ from lsmfapi.collectors.icon_ch1_eps import (
     SURFACE_VARS,
     _compute_rh_from_td,
     _deaccumulate,
+    _ev_flat,
     _extract_station,
     _horizon_str,
     _read_grid_coords,
@@ -38,12 +39,12 @@ from lsmfapi.collectors.icon_ch1_eps import (
 from lsmfapi.config import get_config
 from lsmfapi.database.cache import set_station_altitude_winds, set_station_forecast
 from lsmfapi.models.forecast import (
-    AltitudeWindsPoint,
+    AltitudeWindLevel,
+    AltitudeWindsProfile,
     AltitudeWindsResponse,
     EnsembleValue,
-    ForecastPoint,
-    ForecastResponse,
-    PressureLevelWinds,
+    StationForecastHour,
+    StationForecastResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,11 +60,7 @@ HORIZONS = list(range(30, 121, 3))
 
 
 def _latest_ref_dt_ch2() -> datetime:
-    """Return the most recent CH2-EPS run time that is likely already published.
-
-    CH2-EPS runs every 12 h (00Z/12Z). MeteoSwiss typically publishes data
-    ~2–3 hours after initialisation. We use a 3-hour guard.
-    """
+    """Return most recent CH2-EPS run time that is likely already published (3 h guard)."""
     now = datetime.now(timezone.utc)
     hour = 0 if now.hour < 12 else 12
     candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
@@ -184,7 +181,6 @@ class IconCh2EpsCollector(BaseCollector):
 
             async with httpx.AsyncClient(timeout=300) as client:
 
-                # Pressure level coords: probe U at first horizon
                 level_hpa: np.ndarray | None = None
                 u0_url = await _search_item_url(
                     client, cfg.meteoswiss.stac_base_url, COLLECTION, ref_dt, "U", HORIZONS[0]
@@ -254,7 +250,6 @@ class IconCh2EpsCollector(BaseCollector):
                 for task in surf_tasks[var]:
                     r = task.result() if not task.cancelled() else None
                     if isinstance(r, np.ndarray) and r.ndim == 3:
-                        # 3D result (members, model_levels, stations) — take bottom level (surface)
                         r = r[:, -1, :]
                     steps.append(r if isinstance(r, np.ndarray) and r.ndim == 2 else nan_surf)
                 return np.stack(steps, axis=0)
@@ -298,7 +293,6 @@ class IconCh2EpsCollector(BaseCollector):
 
             level_indices: dict[int, int] = {int(round(h)): i for i, h in enumerate(level_hpa)}
             alt_m_order = sorted(ALTITUDE_TO_HPA.keys())
-            now = datetime.now(timezone.utc)
 
             for s_idx, station in enumerate(stations):
                 station_id = station["station_id"]
@@ -306,78 +300,87 @@ class IconCh2EpsCollector(BaseCollector):
                 lon = float(station["longitude"])
                 elev = int(station["elevation"]) if station.get("elevation") is not None else 0
 
-                hours_list: list[ForecastPoint] = []
-                alt_hours: list[AltitudeWindsPoint] = []
+                forecast_list: list[StationForecastHour] = []
+                profiles_list: list[AltitudeWindsProfile] = []
+
                 for h_idx, h in enumerate(HORIZONS):
                     valid_time = ref_dt + timedelta(hours=h)
 
                     def s(arr: np.ndarray) -> EnsembleValue:
                         return _to_ensemble_value(arr[h_idx, :, s_idx])
 
-                    ws, wd = _wind_ensemble_value(u_10m[h_idx, :, s_idx], v_10m[h_idx, :, s_idx])
+                    ws_ev, wd_ev = _wind_ensemble_value(
+                        u_10m[h_idx, :, s_idx], v_10m[h_idx, :, s_idx]
+                    )
+                    wg_ev = s(vmax_10m)
+                    t_ev  = s(t_c)
+                    rh_ev = s(rh)
+                    p_ev  = s(pmsl_hpa)
+                    pr_ev = s(prec_rate)
 
-                    hours_list.append(ForecastPoint(
+                    ws_p, ws_mn, ws_mx = _ev_flat(ws_ev, scale=3.6)
+                    wg_p, wg_mn, wg_mx = _ev_flat(wg_ev, scale=3.6)
+                    wd_p, wd_mn, wd_mx = _ev_flat(wd_ev)
+                    t_p,  t_mn,  t_mx  = _ev_flat(t_ev)
+                    rh_p, rh_mn, rh_mx = _ev_flat(rh_ev)
+                    p_p,  p_mn,  p_mx  = _ev_flat(p_ev)
+                    pr_p, pr_mn, pr_mx = _ev_flat(pr_ev)
+
+                    forecast_list.append(StationForecastHour(
                         valid_time=valid_time,
-                        wind_speed=ws,
-                        wind_gusts=s(vmax_10m),
-                        wind_direction=wd,
-                        temperature=s(t_c),
-                        humidity=s(rh),
-                        pressure_qff=s(pmsl_hpa),
-                        precipitation=s(prec_rate),
-                        solar_direct=s(solar_direct),
-                        solar_diffuse=s(solar_diffuse),
-                        sunshine_minutes=s(dursun_min),
-                        cloud_cover_total=s(clct),
-                        cloud_cover_low=s(clcl),
-                        cloud_cover_mid=s(clcm),
-                        cloud_cover_high=s(clch),
-                        cloud_base_convective=s(hbas_con),
-                        boundary_layer_height=s(hpbl),
-                        freezing_level=s(hzerocl),
-                        cape=s(cape_ml),
-                        cin=s(cin_ml),
+                        wind_speed=ws_p, wind_speed_min=ws_mn, wind_speed_max=ws_mx,
+                        wind_gust=wg_p, wind_gust_min=wg_mn, wind_gust_max=wg_mx,
+                        wind_direction=wd_p, wind_direction_min=wd_mn, wind_direction_max=wd_mx,
+                        temperature=t_p, temperature_min=t_mn, temperature_max=t_mx,
+                        humidity=rh_p, humidity_min=rh_mn, humidity_max=rh_mx,
+                        pressure_qff=p_p, pressure_qff_min=p_mn, pressure_qff_max=p_mx,
+                        precipitation=pr_p, precipitation_min=pr_mn, precipitation_max=pr_mx,
                     ))
 
-                    pl_list: list[PressureLevelWinds] = []
+                    level_list: list[AltitudeWindLevel] = []
                     for alt_m in alt_m_order:
                         l_idx = level_indices.get(ALTITUDE_TO_HPA[alt_m])
                         if l_idx is not None:
-                            pl_ws, pl_wd = _wind_ensemble_value(
+                            pl_ws_ev, pl_wd_ev = _wind_ensemble_value(
                                 u_pl[h_idx, :, l_idx, s_idx], v_pl[h_idx, :, l_idx, s_idx]
                             )
-                            pl_wv = _to_ensemble_value(w_pl[h_idx, :, l_idx, s_idx])
+                            pl_wv_ev = _to_ensemble_value(w_pl[h_idx, :, l_idx, s_idx])
                         else:
                             nan_ev = EnsembleValue(probable=None, min=None, max=None)
-                            pl_ws = pl_wd = pl_wv = nan_ev
-                        pl_list.append(PressureLevelWinds(
-                            altitude_m=alt_m,
-                            wind_speed=pl_ws,
-                            wind_direction=pl_wd,
-                            vertical_wind=pl_wv,
+                            pl_ws_ev = pl_wd_ev = pl_wv_ev = nan_ev
+
+                        pl_ws_p, pl_ws_mn, pl_ws_mx = _ev_flat(pl_ws_ev, scale=3.6)
+                        pl_wd_p, pl_wd_mn, pl_wd_mx = _ev_flat(pl_wd_ev)
+                        pl_wv_p, pl_wv_mn, pl_wv_mx = _ev_flat(pl_wv_ev)
+
+                        level_list.append(AltitudeWindLevel(
+                            level_m=alt_m,
+                            wind_speed=pl_ws_p, wind_speed_min=pl_ws_mn, wind_speed_max=pl_ws_mx,
+                            wind_direction=pl_wd_p, wind_direction_min=pl_wd_mn, wind_direction_max=pl_wd_mx,
+                            vertical_wind=pl_wv_p, vertical_wind_min=pl_wv_mn, vertical_wind_max=pl_wv_mx,
                         ))
-                    alt_hours.append(AltitudeWindsPoint(valid_time=valid_time, levels=pl_list))
+                    profiles_list.append(AltitudeWindsProfile(valid_time=valid_time, levels=level_list))
 
                 set_station_forecast(
                     station_id,
-                    ForecastResponse(
-                        station_lat=lat,
-                        station_lon=lon,
-                        station_elevation=elev,
-                        generated_at=now,
-                        hours=hours_list,
+                    StationForecastResponse(
+                        station_id=station_id,
+                        init_time=ref_dt,
+                        model="icon-ch2",
+                        source="swissmeteo",
+                        forecast=forecast_list,
                     ),
                 )
                 set_station_altitude_winds(
                     station_id,
                     AltitudeWindsResponse(
-                        station_lat=lat,
-                        station_lon=lon,
-                        station_elevation=elev,
-                        generated_at=now,
-                        hours=alt_hours,
+                        station_id=station_id,
+                        init_time=ref_dt,
+                        model="icon-ch2",
+                        source="swissmeteo",
+                        profiles=profiles_list,
                     ),
                 )
-                logger.info("CH2 cached forecast for %s (%d hours)", station_id, len(hours_list))
+                logger.info("CH2 cached forecast for %s (%d hours)", station_id, len(forecast_list))
 
         logger.info("IconCh2EpsCollector.collect() complete — %d stations", len(stations))

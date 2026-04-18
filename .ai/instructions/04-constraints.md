@@ -1,5 +1,11 @@
 # Constraints — What NOT to Do
 
+## AI Files
+
+**All AI-related content lives exclusively in `.ai/`.** Never create tool-specific instruction files such as `CLAUDE.md`, `.cursorrules`, `.github/copilot-instructions.md`, `.windsurfrules`, or any equivalent — not even as thin pointers. Instructions, context, prompts, and plans all go in `.ai/` and nowhere else.
+
+---
+
 ## Production
 
 **Never touch prod directly.** All production changes go through the IaC repo. No direct SSH, no direct `docker-compose` on the prod host.
@@ -9,14 +15,6 @@
 ## Frontend
 
 **Never add npm or a build step.** The frontend is intentionally dependency-free. No webpack, vite, rollup, parcel, or any bundler. No `package.json`.
-
-**No i18n system.** The LSMFAPI GUI is English only — internal operator tool. Do not add locale JSON files, `data-i18n` attributes, `initI18n()` calls, or a language picker. Hardcode all strings in English directly in HTML/JS.
-
----
-
-## Pressure Fields
-
-**Always use QFF — never QNH.** All pressure fields are named `pressure_qff` in API responses, InfluxDB fields, Pydantic schemas, and UI labels. Lenticularis is being migrated from QNH to QFF; LSMFAPI uses QFF from day one.
 
 ---
 
@@ -28,13 +26,13 @@
 
 ## Database Migrations
 
-**Never skip `_run_column_migrations`** when adding columns to existing tables. SQLAlchemy's `create_all` does not alter existing tables — new columns on existing tables require an explicit `ALTER TABLE` in `_run_column_migrations()` in `db.py`. Always make migrations idempotent by checking `PRAGMA table_info` first.
+**Never skip creating a migration script** when adding tables or columns. SQLAlchemy's `create_all` does not handle schema drift — all changes require a new `.sql` file in `src/[package]/database/migrations/` with a sequential prefix (e.g., `0002_add_widgets.sql`). Migrations are tracked via the `_migrations` table in SQLite. Always make SQL statements idempotent using `IF NOT EXISTS` where possible.
 
 ---
 
-## Historical Data
+## i18n
 
-**LSMFAPI stores no historical data.** Forecast data lives only in the in-memory cache for the duration of the process. Lenticularis owns all historical archiving. The accuracy GUI fetches historical data directly from Lenticularis.
+**Never hardcode user-visible strings in JS** without a corresponding key in all locale files. All locales must be updated simultaneously.
 
 ---
 

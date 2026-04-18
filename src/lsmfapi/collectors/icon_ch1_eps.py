@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import re
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -12,14 +13,15 @@ from scipy.spatial import cKDTree
 
 from lsmfapi.collectors.base import BaseCollector
 from lsmfapi.config import get_config
-from lsmfapi.database.cache import set_station_altitude_winds, set_station_forecast
+from lsmfapi.database.cache import set_grid_wind_cache, set_station_altitude_winds, set_station_forecast
 from lsmfapi.models.forecast import (
-    AltitudeWindsPoint,
+    AltitudeWindLevel,
+    AltitudeWindsProfile,
     AltitudeWindsResponse,
     EnsembleValue,
-    ForecastPoint,
-    ForecastResponse,
-    PressureLevelWinds,
+    GridWindCache,
+    StationForecastHour,
+    StationForecastResponse,
 )
 from lsmfapi.services.ensemble import compute_stats, compute_wind_direction_stats
 
@@ -27,6 +29,20 @@ logger = logging.getLogger(__name__)
 
 # ---------- Module-level grid singleton (built once per process) ----------
 _GRID_TREE: cKDTree | None = None
+_GRID_LATS: np.ndarray | None = None   # all ICON-CH1 grid lats
+_GRID_LONS: np.ndarray | None = None   # all ICON-CH1 grid lons
+
+# Pre-sampled 1 km regular grid indices into _GRID_TREE for the default bbox
+_GRID_SAMPLE_INDICES: np.ndarray | None = None
+_GRID_N_LAT: int = 0
+_GRID_N_LON: int = 0
+
+# Default Switzerland bbox for grid pre-sampling
+GRID_LAT_MAX = 47.9
+GRID_LAT_MIN = 45.8
+GRID_LON_MIN = 5.9
+GRID_LON_MAX = 10.6
+GRID_STEP_DEG = 1.0 / 111.0  # ~1 km
 
 # ---------- Collection constants ----------
 COLLECTION = "ch.meteoschweiz.ogd-forecasting-icon-ch1"
@@ -58,19 +74,27 @@ def _horizon_str(h: int) -> str:
 
 
 def _parse_horizon_h(s: str) -> int:
-    """Parse ISO 8601 duration → integer hours. Returns -1 on failure.
-
-    Handles both 'P0DT06H00M00S' (with days) and 'PT6H' (no days) forms.
-    """
-    # Form with days: P[n]DT[n]H...
+    """Parse ISO 8601 duration → integer hours. Returns -1 on failure."""
     m = re.match(r"P(\d+)DT(\d+)H", s)
     if m:
         return int(m.group(1)) * 24 + int(m.group(2))
-    # Form without days: PT[n]H...
     m = re.match(r"PT(\d+)H", s)
     if m:
         return int(m.group(1))
     return -1
+
+
+def _f(v: float | None, scale: float = 1.0) -> float | None:
+    """Scale a nullable float and round to 1 dp; pass through None."""
+    if v is None:
+        return None
+    result = v * scale
+    return None if math.isnan(result) else round(result, 1)
+
+
+def _ev_flat(ev: EnsembleValue, scale: float = 1.0) -> tuple[float | None, float | None, float | None]:
+    """Return (probable, min, max) from EnsembleValue, optionally scaled."""
+    return _f(ev.probable, scale), _f(ev.min, scale), _f(ev.max, scale)
 
 
 async def _search_item_url(
@@ -82,7 +106,6 @@ async def _search_item_url(
     horizon_h: int,
     perturbed: bool = True,
 ) -> str | None:
-    """Return the download URL for one (variable, horizon) pair, or None if not available."""
     payload = {
         "collections": [collection],
         "forecast:reference_datetime": f"{ref_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}/..",
@@ -102,12 +125,7 @@ async def _search_item_url(
 
 
 def _latest_ref_dt() -> datetime:
-    """Return the most recent CH1-EPS run time that is likely already published.
-
-    CH1-EPS runs every 6 h (00Z/06Z/12Z/18Z). MeteoSwiss typically publishes
-    data ~90 min after initialisation. We use a 2-hour guard so that a run
-    started at, say, 18:00Z is not selected until 20:00Z.
-    """
+    """Return most recent CH1-EPS run time likely already published (2 h guard)."""
     now = datetime.now(timezone.utc)
     hour = (now.hour // 6) * 6
     candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
@@ -117,13 +135,12 @@ def _latest_ref_dt() -> datetime:
 
 
 def _deaccumulate(arr: np.ndarray) -> np.ndarray:
-    """Difference accumulated field along steps axis (axis=0).
-    arr shape: (n_steps, n_members) — returns per-step delta."""
+    """Difference accumulated field along steps axis (axis=0)."""
     return np.diff(arr, axis=0, prepend=arr[:1, :] * 0)
 
 
 def _compute_rh_from_td(t_k: np.ndarray, td_k: np.ndarray) -> np.ndarray:
-    """Relative humidity from T_2M and TD_2M (both in Kelvin), Magnus formula."""
+    """Relative humidity from T_2M and TD_2M (Kelvin), Magnus formula."""
     t_c  = t_k  - 273.15
     td_c = td_k - 273.15
     rh = 100.0 * np.exp(17.625 * td_c / (243.04 + td_c)) / np.exp(17.625 * t_c / (243.04 + t_c))
@@ -138,14 +155,15 @@ def _to_ensemble_value(arr_1d: np.ndarray) -> EnsembleValue:
 def _wind_ensemble_value(u: np.ndarray, v: np.ndarray) -> tuple[EnsembleValue, EnsembleValue]:
     speeds = np.sqrt(u ** 2 + v ** 2)
     directions = (270.0 - np.degrees(np.arctan2(v, u))) % 360.0
-    return EnsembleValue(**compute_stats(speeds.tolist())), \
-           EnsembleValue(**compute_wind_direction_stats(directions.tolist()))
+    return (
+        EnsembleValue(**compute_stats(speeds.tolist())),
+        EnsembleValue(**compute_wind_direction_stats(directions.tolist())),
+    )
 
 
 # ---------- eccodes-based GRIB2 readers ----------
 
 def _eccodes_get(msg, key: str, default=None):
-    """Get a scalar key from an eccodes message, returning default on error."""
     try:
         return eccodes.codes_get(msg, key)
     except eccodes.CodesInternalError:
@@ -153,15 +171,7 @@ def _eccodes_get(msg, key: str, default=None):
 
 
 def _read_grid_coords(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Read geographic lat/lon from a COSMO/ICON horizontal_constants GRIB2.
-
-    For ICON unstructured grids the `latitudes`/`longitudes` eccodes keys are
-    unavailable.  Instead the file contains RLAT and RLON messages whose *data
-    values* are the geographic coordinates of every grid point, stored in
-    radians (COSMO convention).
-
-    Returns (lats, lons) as 1-D float64 arrays of length N_grid_points.
-    """
+    """Read geographic lat/lon from a COSMO/ICON horizontal_constants GRIB2."""
     rlat: np.ndarray | None = None
     rlon: np.ndarray | None = None
 
@@ -191,8 +201,6 @@ def _read_grid_coords(path: Path) -> tuple[np.ndarray, np.ndarray]:
             f"Messages found: {found_names}"
         )
 
-    # COSMO stores coordinates in radians → convert to degrees.
-    # Guard: if values already exceed ±(π/2 + ε) they are already in degrees.
     if np.max(np.abs(rlat)) <= np.pi / 2 + 0.01:
         lats = np.degrees(rlat)
         lons = np.degrees(rlon)
@@ -215,10 +223,8 @@ def _read_grib2_eccodes(
       Surface  : (n_members, n_points)
       Multi-lev: (n_members, n_levels, n_points)
     level_hpa  : None for surface, ndarray of hPa for pressure-level files.
-
-    Returns (None, None) on failure.
     """
-    messages: list[tuple[int, int, np.ndarray]] = []  # (member, level, values)
+    messages: list[tuple[int, int, np.ndarray]] = []
 
     try:
         with open(str(path), "rb") as f:
@@ -263,11 +269,7 @@ def _read_grib2_eccodes(
 
 
 def _extract_station(arr: np.ndarray, flat_idx: int) -> np.ndarray:
-    """Extract values at one station using its flat grid index.
-
-    arr shape: (n_members, n_points) or (n_members, n_levels, n_points)
-    Returns  : (n_members,)          or (n_members, n_levels)
-    """
+    """Extract values at one station. Returns (n_members,) or (n_members, n_levels)."""
     return arr[..., flat_idx]
 
 
@@ -276,12 +278,10 @@ def _extract_station(arr: np.ndarray, flat_idx: int) -> np.ndarray:
 class IconCh1EpsCollector(BaseCollector):
     """ICON-CH1-EPS collector — 0–30 h, 4 runs/day (00Z/06Z/12Z/18Z), 11 members."""
 
-    # ------------------------------------------------------------------ #
-    # Grid constants                                                       #
-    # ------------------------------------------------------------------ #
-
     async def _ensure_grid(self, tmpdir: Path) -> None:
-        global _GRID_TREE
+        global _GRID_TREE, _GRID_LATS, _GRID_LONS
+        global _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON
+
         if _GRID_TREE is not None:
             return
 
@@ -309,13 +309,26 @@ class IconCh1EpsCollector(BaseCollector):
         await self.download(constants_url, str(dest))
 
         lats, lons = _read_grid_coords(dest)
+        _GRID_LATS = lats
+        _GRID_LONS = lons
+
         flat_coords = np.column_stack([lats, lons])
         _GRID_TREE = cKDTree(flat_coords)
         logger.info("KD-tree built: %d grid points", len(lats))
 
-    # ------------------------------------------------------------------ #
-    # Station list                                                         #
-    # ------------------------------------------------------------------ #
+        # Pre-sample regular 1 km grid over the default Switzerland bbox
+        lat_arr = np.arange(GRID_LAT_MAX, GRID_LAT_MIN - GRID_STEP_DEG / 2, -GRID_STEP_DEG)
+        lon_arr = np.arange(GRID_LON_MIN, GRID_LON_MAX + GRID_STEP_DEG / 2, GRID_STEP_DEG)
+        _GRID_N_LAT = len(lat_arr)
+        _GRID_N_LON = len(lon_arr)
+
+        lon_grid, lat_grid = np.meshgrid(lon_arr, lat_arr)
+        sample_coords = np.column_stack([lat_grid.ravel(), lon_grid.ravel()])
+        _, _GRID_SAMPLE_INDICES = _GRID_TREE.query(sample_coords)
+        logger.info(
+            "Grid sample indices computed: %d × %d = %d points",
+            _GRID_N_LAT, _GRID_N_LON, len(_GRID_SAMPLE_INDICES),
+        )
 
     async def _fetch_stations(self) -> list[dict]:
         cfg = get_config()
@@ -323,10 +336,6 @@ class IconCh1EpsCollector(BaseCollector):
             resp = await client.get(f"{cfg.lenticularis.base_url}/api/stations")
             resp.raise_for_status()
             return resp.json()
-
-    # ------------------------------------------------------------------ #
-    # Per-(variable, step) fetch                                          #
-    # ------------------------------------------------------------------ #
 
     async def _fetch_step(
         self,
@@ -337,7 +346,12 @@ class IconCh1EpsCollector(BaseCollector):
         horizon_h: int,
         station_flat_indices: np.ndarray,
         tmpdir: Path,
+        keep: bool = False,
     ) -> np.ndarray | None:
+        """Download one (variable, horizon) GRIB, extract station values, return array.
+
+        keep=True skips deletion so the file can be re-read for grid extraction.
+        """
         cfg = get_config()
         async with semaphore:
             try:
@@ -350,7 +364,7 @@ class IconCh1EpsCollector(BaseCollector):
                 return None
 
             if url is None:
-                return None  # variable not available at this horizon — expected, no log
+                return None
 
             dest = tmpdir / f"{variable}_{horizon_h:03d}.grib2"
             try:
@@ -371,11 +385,135 @@ class IconCh1EpsCollector(BaseCollector):
             logger.debug("CH1 data %s h=%d shape=%s", variable, horizon_h, result.shape)
             return result
         finally:
-            dest.unlink(missing_ok=True)
+            if not keep:
+                dest.unlink(missing_ok=True)
 
-    # ------------------------------------------------------------------ #
-    # Main collect                                                         #
-    # ------------------------------------------------------------------ #
+    def collect_grid(
+        self,
+        ref_dt: datetime,
+        tmpdir: Path,
+        level_indices: dict[int, int],
+    ) -> None:
+        """Build GridWindCache from U/V GRIBs already on disk in tmpdir.
+
+        Files were kept by _fetch_step(keep=True) during station collection.
+        Reads one horizon at a time (peak ~2 GRIBs in memory), deletes each
+        file immediately after extraction.
+
+        Note: ~2–3 GB of temp disk is consumed while the files sit in tmpdir
+        waiting for station processing to finish — the trade-off for avoiding
+        a second download pass.
+        """
+        if _GRID_SAMPLE_INDICES is None:
+            logger.info("Grid sample indices not available; skipping grid collection")
+            return
+
+        n_grid = len(_GRID_SAMPLE_INDICES)
+        n_horizons = len(HORIZONS)
+        alt_m_order = sorted(ALTITUDE_TO_HPA.keys())
+
+        ws_cache: dict[int, np.ndarray] = {
+            alt_m: np.full((n_horizons, n_grid), np.nan, dtype=np.float32)
+            for alt_m in alt_m_order
+        }
+        wd_cache: dict[int, np.ndarray] = {
+            alt_m: np.full((n_horizons, n_grid), np.nan, dtype=np.float32)
+            for alt_m in alt_m_order
+        }
+        rh_cache = np.full((n_horizons, n_grid), np.nan, dtype=np.float32)
+
+        for h_idx, h in enumerate(HORIZONS):
+            u_grid: np.ndarray | None = None
+            v_grid: np.ndarray | None = None
+
+            for var in ("U", "V"):
+                dest = tmpdir / f"{var}_{h:03d}.grib2"
+                if not dest.exists():
+                    continue
+                try:
+                    arr, _ = _read_grib2_eccodes(dest)
+                    if arr is None or arr.ndim < 3:
+                        continue
+                    # arr: (n_members, n_levels, n_points)
+                    extracted = arr[:, :, _GRID_SAMPLE_INDICES]  # (n_members, n_levels, n_grid)
+                    if var == "U":
+                        u_grid = extracted
+                    else:
+                        v_grid = extracted
+                except Exception as exc:
+                    logger.warning("Grid parse %s h=%d: %s", var, h, exc)
+                finally:
+                    dest.unlink(missing_ok=True)
+
+            if u_grid is None or v_grid is None:
+                continue
+
+            for alt_m in alt_m_order:
+                l_idx = level_indices.get(ALTITUDE_TO_HPA[alt_m])
+                if l_idx is None:
+                    continue
+                u = u_grid[:, l_idx, :].astype(np.float64)  # (n_members, n_grid)
+                v = v_grid[:, l_idx, :].astype(np.float64)
+                speeds = np.sqrt(u ** 2 + v ** 2) * 3.6      # m/s → km/h
+                dirs = (270.0 - np.degrees(np.arctan2(v, u))) % 360.0
+                rad = np.deg2rad(dirs)
+                ws_cache[alt_m][h_idx] = np.nanmedian(speeds, axis=0).astype(np.float32)
+                wd_cache[alt_m][h_idx] = (np.degrees(np.arctan2(
+                    np.nanmedian(np.sin(rad), axis=0),
+                    np.nanmedian(np.cos(rad), axis=0),
+                )) % 360.0).astype(np.float32)
+
+            # Surface humidity — T_2M and TD_2M are (n_members, n_points)
+            t_dest  = tmpdir / f"T_2M_{h:03d}.grib2"
+            td_dest = tmpdir / f"TD_2M_{h:03d}.grib2"
+            t_arr: np.ndarray | None = None
+            td_arr: np.ndarray | None = None
+            for dest, store in ((t_dest, "t"), (td_dest, "td")):
+                if not dest.exists():
+                    continue
+                try:
+                    arr, _ = _read_grib2_eccodes(dest)
+                    if arr is not None and arr.ndim == 2:
+                        if store == "t":
+                            t_arr = arr[:, _GRID_SAMPLE_INDICES]   # (n_members, n_grid)
+                        else:
+                            td_arr = arr[:, _GRID_SAMPLE_INDICES]
+                except Exception as exc:
+                    logger.warning("Grid parse %s h=%d: %s", dest.name, h, exc)
+                finally:
+                    dest.unlink(missing_ok=True)
+
+            if t_arr is not None and td_arr is not None:
+                rh_members = _compute_rh_from_td(
+                    t_arr.astype(np.float64),
+                    td_arr.astype(np.float64),
+                )  # (n_members, n_grid)
+                rh_cache[h_idx] = np.nanmedian(rh_members, axis=0).astype(np.float32)
+
+            logger.debug("Grid h=%d computed for %d levels", h, len(alt_m_order))
+
+        lat_arr = np.arange(GRID_LAT_MAX, GRID_LAT_MIN - GRID_STEP_DEG / 2, -GRID_STEP_DEG)
+        lon_arr = np.arange(GRID_LON_MIN, GRID_LON_MAX + GRID_STEP_DEG / 2, GRID_STEP_DEG)
+        lon_grid_2d, lat_grid_2d = np.meshgrid(lon_arr, lat_arr)
+
+        set_grid_wind_cache(GridWindCache(
+            init_time=ref_dt,
+            lats=lat_grid_2d.ravel().astype(np.float32),
+            lons=lon_grid_2d.ravel().astype(np.float32),
+            n_lat=_GRID_N_LAT,
+            n_lon=_GRID_N_LON,
+            lat_max=float(lat_arr[0]),
+            lon_min=float(lon_arr[0]),
+            step_deg=GRID_STEP_DEG,
+            valid_times=[ref_dt + timedelta(hours=h) for h in HORIZONS],
+            ws=ws_cache,
+            wd=wd_cache,
+            rh=rh_cache,
+        ))
+        logger.info(
+            "GridWindCache set: %d × %d points, %d levels, init_time=%s",
+            _GRID_N_LAT, _GRID_N_LON, len(alt_m_order), ref_dt.isoformat(),
+        )
 
     async def collect(self) -> None:  # noqa: C901
         ref_dt = _latest_ref_dt()
@@ -402,7 +540,6 @@ class IconCh1EpsCollector(BaseCollector):
 
             async with httpx.AsyncClient(timeout=300) as client:
 
-                # Pressure level coords: probe U at h=0
                 level_hpa: np.ndarray | None = None
                 u0_url = await _search_item_url(
                     client, cfg.meteoswiss.stac_base_url, COLLECTION, ref_dt, "U", HORIZONS[0]
@@ -428,9 +565,13 @@ class IconCh1EpsCollector(BaseCollector):
                 progress = [0, n_surf + n_pres]
 
                 async def fetch(var: str, h: int) -> np.ndarray | None:
+                    # Keep U/V (pressure-level wind) and T_2M/TD_2M (surface humidity)
+                    # on disk so collect_grid() can read them without re-downloading
+                    keep = var in ("U", "V", "T_2M", "TD_2M")
                     try:
                         return await self._fetch_step(
-                            semaphore, client, ref_dt, var, h, station_flat_indices, tmpdir
+                            semaphore, client, ref_dt, var, h, station_flat_indices, tmpdir,
+                            keep=keep,
                         )
                     finally:
                         progress[0] += 1
@@ -472,7 +613,6 @@ class IconCh1EpsCollector(BaseCollector):
                 for task in surf_tasks[var]:
                     r = task.result() if not task.cancelled() else None
                     if isinstance(r, np.ndarray) and r.ndim == 3:
-                        # 3D result (members, model_levels, stations) — take bottom level (surface)
                         r = r[:, -1, :]
                     steps.append(r if isinstance(r, np.ndarray) and r.ndim == 2 else nan_surf)
                 return np.stack(steps, axis=0)
@@ -516,7 +656,6 @@ class IconCh1EpsCollector(BaseCollector):
 
             level_indices: dict[int, int] = {int(round(h)): i for i, h in enumerate(level_hpa)}
             alt_m_order = sorted(ALTITUDE_TO_HPA.keys())
-            now = datetime.now(timezone.utc)
 
             for s_idx, station in enumerate(stations):
                 station_id = station["station_id"]
@@ -524,78 +663,93 @@ class IconCh1EpsCollector(BaseCollector):
                 lon  = float(station["longitude"])
                 elev = int(station["elevation"]) if station.get("elevation") is not None else 0
 
-                hours_list: list[ForecastPoint] = []
-                alt_hours: list[AltitudeWindsPoint] = []
+                forecast_list: list[StationForecastHour] = []
+                profiles_list: list[AltitudeWindsProfile] = []
+
                 for h_idx, h in enumerate(HORIZONS):
                     valid_time = ref_dt + timedelta(hours=h)
 
                     def s(arr: np.ndarray) -> EnsembleValue:
                         return _to_ensemble_value(arr[h_idx, :, s_idx])
 
-                    ws, wd = _wind_ensemble_value(u_10m[h_idx, :, s_idx], v_10m[h_idx, :, s_idx])
+                    ws_ev, wd_ev = _wind_ensemble_value(
+                        u_10m[h_idx, :, s_idx], v_10m[h_idx, :, s_idx]
+                    )
+                    wg_ev = s(vmax_10m)
+                    t_ev  = s(t_c)
+                    rh_ev = s(rh)
+                    p_ev  = s(pmsl_hpa)
+                    pr_ev = s(prec_rate)
 
-                    hours_list.append(ForecastPoint(
+                    ws_p, ws_mn, ws_mx = _ev_flat(ws_ev, scale=3.6)
+                    wg_p, wg_mn, wg_mx = _ev_flat(wg_ev, scale=3.6)
+                    wd_p, wd_mn, wd_mx = _ev_flat(wd_ev)
+                    t_p,  t_mn,  t_mx  = _ev_flat(t_ev)
+                    rh_p, rh_mn, rh_mx = _ev_flat(rh_ev)
+                    p_p,  p_mn,  p_mx  = _ev_flat(p_ev)
+                    pr_p, pr_mn, pr_mx = _ev_flat(pr_ev)
+
+                    forecast_list.append(StationForecastHour(
                         valid_time=valid_time,
-                        wind_speed=ws,
-                        wind_gusts=s(vmax_10m),
-                        wind_direction=wd,
-                        temperature=s(t_c),
-                        humidity=s(rh),
-                        pressure_qff=s(pmsl_hpa),
-                        precipitation=s(prec_rate),
-                        solar_direct=s(solar_direct),
-                        solar_diffuse=s(solar_diffuse),
-                        sunshine_minutes=s(dursun_min),
-                        cloud_cover_total=s(clct),
-                        cloud_cover_low=s(clcl),
-                        cloud_cover_mid=s(clcm),
-                        cloud_cover_high=s(clch),
-                        cloud_base_convective=s(hbas_con),
-                        boundary_layer_height=s(hpbl),
-                        freezing_level=s(hzerocl),
-                        cape=s(cape_ml),
-                        cin=s(cin_ml),
+                        wind_speed=ws_p, wind_speed_min=ws_mn, wind_speed_max=ws_mx,
+                        wind_gust=wg_p, wind_gust_min=wg_mn, wind_gust_max=wg_mx,
+                        wind_direction=wd_p, wind_direction_min=wd_mn, wind_direction_max=wd_mx,
+                        temperature=t_p, temperature_min=t_mn, temperature_max=t_mx,
+                        humidity=rh_p, humidity_min=rh_mn, humidity_max=rh_mx,
+                        pressure_qff=p_p, pressure_qff_min=p_mn, pressure_qff_max=p_mx,
+                        precipitation=pr_p, precipitation_min=pr_mn, precipitation_max=pr_mx,
                     ))
 
-                    pl_list: list[PressureLevelWinds] = []
+                    level_list: list[AltitudeWindLevel] = []
                     for alt_m in alt_m_order:
                         l_idx = level_indices.get(ALTITUDE_TO_HPA[alt_m])
                         if l_idx is not None:
-                            pl_ws, pl_wd = _wind_ensemble_value(
+                            pl_ws_ev, pl_wd_ev = _wind_ensemble_value(
                                 u_pl[h_idx, :, l_idx, s_idx], v_pl[h_idx, :, l_idx, s_idx]
                             )
-                            pl_wv = _to_ensemble_value(w_pl[h_idx, :, l_idx, s_idx])
+                            pl_wv_ev = _to_ensemble_value(w_pl[h_idx, :, l_idx, s_idx])
                         else:
                             nan_ev = EnsembleValue(probable=None, min=None, max=None)
-                            pl_ws = pl_wd = pl_wv = nan_ev
-                        pl_list.append(PressureLevelWinds(
-                            altitude_m=alt_m,
-                            wind_speed=pl_ws,
-                            wind_direction=pl_wd,
-                            vertical_wind=pl_wv,
+                            pl_ws_ev = pl_wd_ev = pl_wv_ev = nan_ev
+
+                        pl_ws_p, pl_ws_mn, pl_ws_mx = _ev_flat(pl_ws_ev, scale=3.6)
+                        pl_wd_p, pl_wd_mn, pl_wd_mx = _ev_flat(pl_wd_ev)
+                        pl_wv_p, pl_wv_mn, pl_wv_mx = _ev_flat(pl_wv_ev)
+
+                        level_list.append(AltitudeWindLevel(
+                            level_m=alt_m,
+                            wind_speed=pl_ws_p, wind_speed_min=pl_ws_mn, wind_speed_max=pl_ws_mx,
+                            wind_direction=pl_wd_p, wind_direction_min=pl_wd_mn, wind_direction_max=pl_wd_mx,
+                            vertical_wind=pl_wv_p, vertical_wind_min=pl_wv_mn, vertical_wind_max=pl_wv_mx,
                         ))
-                    alt_hours.append(AltitudeWindsPoint(valid_time=valid_time, levels=pl_list))
+                    profiles_list.append(AltitudeWindsProfile(valid_time=valid_time, levels=level_list))
 
                 set_station_forecast(
                     station_id,
-                    ForecastResponse(
-                        station_lat=lat,
-                        station_lon=lon,
-                        station_elevation=elev,
-                        generated_at=now,
-                        hours=hours_list,
+                    StationForecastResponse(
+                        station_id=station_id,
+                        init_time=ref_dt,
+                        model="icon-ch1",
+                        source="swissmeteo",
+                        forecast=forecast_list,
                     ),
                 )
                 set_station_altitude_winds(
                     station_id,
                     AltitudeWindsResponse(
-                        station_lat=lat,
-                        station_lon=lon,
-                        station_elevation=elev,
-                        generated_at=now,
-                        hours=alt_hours,
+                        station_id=station_id,
+                        init_time=ref_dt,
+                        model="icon-ch1",
+                        source="swissmeteo",
+                        profiles=profiles_list,
                     ),
                 )
-                logger.info("Cached forecast for %s (%d hours)", station_id, len(hours_list))
+                logger.info("Cached forecast for %s (%d hours)", station_id, len(forecast_list))
+
+            # Grid collection reads the U/V GRIBs kept in tmpdir
+            try:
+                self.collect_grid(ref_dt, tmpdir, level_indices)
+            except Exception:
+                logger.exception("Grid collection failed — station data unaffected")
 
         logger.info("IconCh1EpsCollector.collect() complete — %d stations", len(stations))

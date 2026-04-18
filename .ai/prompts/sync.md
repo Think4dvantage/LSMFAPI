@@ -26,7 +26,12 @@ Scan the conversation and the working directory. For each category, note what is
 | Open issues | Bugs found but not fixed, TODOs left in code |
 | In-progress work | Partially completed tasks that need to be resumed |
 
-Write a brief internal summary before proceeding (not written to any file — just to organize the next steps).
+**Action**: Share a summary of these discoveries with the user.
+"I've audited the session and found the following changes to sync:
+[Summary of changes]
+Should I proceed with updating the `.ai/` context and human-readable files?"
+
+Wait for user confirmation before proceeding to Step 2.
 
 ---
 
@@ -118,4 +123,10 @@ Report the checklist result. If any item is incomplete, complete it before finis
 
 ## After This Prompt
 
-The session is ready to clear. Run `/clear` when ready. The next session should start by reading `.ai/` — everything needed to continue will be there.
+The session is ready to clear. Run `/clear` when ready. 
+
+> **Tip**: If you want to pull in the latest framework improvements or new prompts from the central AI Blueprint repository, run the update prompt:
+> 
+> `/prompt .ai/prompts/update-blueprint.md`
+
+The next session should start by reading `.ai/` — everything needed to continue will be there.

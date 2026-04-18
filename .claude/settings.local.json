@@ -16,7 +16,8 @@
       "Bash(curl *)",
       "WebFetch(domain:opendatadocs.meteoschweiz.ch)",
       "Bash(python3 *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(gh api *)"
     ]
   }
 }

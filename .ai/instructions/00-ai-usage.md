@@ -6,34 +6,20 @@ This `.ai/` folder is the **single source of truth** for all AI instructions in 
 
 ## The Tool-Agnostic Rule
 
-**Never put real AI instructions in tool-specific files** (`CLAUDE.md`, `.cursorrules`, `.github/copilot-instructions.md`, `.windsurfrules`, etc.).
+**All AI instructions live exclusively in `.ai/`.** Never create tool-specific instruction files.
 
-Instead, keep all instructions in `.ai/` and use thin pointer files per tool:
+- Do **not** create `CLAUDE.md`, `.cursorrules`, `.github/copilot-instructions.md`, `.windsurfrules`, or any equivalent file — even as a thin pointer.
+- Any AI assistant reading this repo must read the `.ai/` folder directly. No wrapper files.
+- If a tool requires its own file to function, configure it to point to `.ai/` via its settings UI or config — do not create a file in the repo.
 
-**Claude Code** — `CLAUDE.md` at repo root:
-```markdown
-Project conventions and architecture live in `.ai/`. Read the relevant files before making changes.
-```
-
-**GitHub Copilot** — `.github/copilot-instructions.md`:
-```markdown
-Project conventions and architecture live in `.ai/`. Read the relevant files before making changes.
-```
-
-**Cursor** — `.cursorrules`:
-```
-Project conventions and architecture live in .ai/. Read the relevant files before making changes.
-```
-
-Pointer files should contain nothing else. All real content goes in `.ai/`.
+This keeps the repo clean and ensures instructions are maintained in one place regardless of which AI tool is in use.
 
 ---
 
 ## Setting Up a New Project
 
 1. Copy this `.ai/` folder to the repo root.
-2. Create thin pointer files for whichever AI tools the team uses (see above).
-3. Find and replace every `[PROJECT NAME]` / `[package]` placeholder with real values.
+2. Find and replace every `[PROJECT NAME]` / `[package]` placeholder with real values.
 4. Fill in `instructions/01-project-overview.md` — tech stack, repo layout, data sources, user roles.
 5. Start filling in `context/architecture.md` as you add tables, measurements, and routes.
 6. Update `context/features.md` as milestones ship.
@@ -70,6 +56,7 @@ Before making any changes, read the relevant `.ai/` files:
 - `instructions/03-frontend-conventions.md` — no-build-step JS, i18n, theming
 - `instructions/04-constraints.md` — hard rules (what NOT to do)
 - `instructions/05-user-profile.md` — who the user is, how to communicate, working rules
+- `instructions/08-operability.md` — logging doctrine, health endpoints, config transparency
 - `context/architecture.md` — SQLite schema, InfluxDB measurements, API contracts
 - `context/features.md` — shipped milestones and backlog
 
@@ -105,11 +92,20 @@ Update the relevant files whenever the `.ai/` context changes:
 
 **Rule**: If the `.ai/` context is the source of truth, human-readable files are derived output. Never let them drift more than one session behind.
 
-**Before ending a session** (or when asked to prepare for `/clear`), run `.ai/prompts/sync.md` to flush all pending updates at once.
+**Before ending a session** (or when asked to prepare for `/clear`), run `.ai/prompts/sync.md` to flush all pending updates at once. This ensures that the `.ai/` context and all human-readable files are in sync.
+
+### Staying in Sync with the Blueprint
+
+If you want to pull in the latest framework improvements, new prompts, or updated instructions from the central [AI Blueprint](https://github.com/Think4dvantage/ai-blueprint), run:
+
+`/prompt .ai/prompts/update-blueprint.md`
+
+This will sync the project's framework files with the central repository while keeping your project-specific data intact.
 
 ---
 
 ## File Map
+
 
 ```
 .ai/
@@ -120,11 +116,15 @@ Update the relevant files whenever the `.ai/` context changes:
     03-frontend-conventions.md  ← No-build-step JS, i18n, dark theme, logging
     04-constraints.md           ← Hard rules: what NOT to do
     05-user-profile.md          ← Who the user is, communication style, working rules
+    06-testing-conventions.md   ← Testing strategy, Pytest, Playwright
+    07-api-conventions.md       ← Standardized API response format
+    08-operability.md           ← Logging doctrine, health endpoints, config transparency
   context/
     architecture.md             ← SQLite tables, InfluxDB measurements, API contracts
     features.md                 ← Shipped milestones + backlog
   prompts/
     new-feature.md              ← End-to-end implementation checklist
+    fix-bug.md                  ← Bug-fixing workflow (Reproduction First)
     add-api-router.md           ← Router scaffolding steps
     add-sqlite-table.md         ← Table + migration steps
     add-i18n-keys.md            ← Locale file update steps
@@ -151,7 +151,7 @@ These principles govern all planning decisions. Amendments require explicit disc
 1. **Read before acting**: Always read `.ai/` before suggesting or making changes.
 2. **Plan before building**: Non-trivial features get a spec + plan before implementation.
 3. **Minimal scope**: Implement what was asked, not more.
-4. **Tool-agnostic instructions**: All AI context lives in `.ai/`, not in tool-specific files.
+4. **Tool-agnostic instructions**: All AI context lives in `.ai/`, not in tool-specific files. Never create `CLAUDE.md`, `.cursorrules`, or any equivalent. Nothing AI-related goes outside `.ai/`.
 5. **Keep docs in sync**: Human-readable files (README, PLANNING, docs) are derived from `.ai/`. Run `sync.md` before ending a session.
 6. **No secrets committed**: Config files and `.env` are gitignored. Only `.example` files are committed.
 7. **Prod is off-limits**: Never touch production directly. All changes go through the deployment pipeline.
