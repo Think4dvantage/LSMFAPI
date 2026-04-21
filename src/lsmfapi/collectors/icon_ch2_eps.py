@@ -25,6 +25,8 @@ from lsmfapi.collectors.icon_ch1_eps import (
     DOWNLOAD_CONCURRENCY,
     PRESSURE_VARS,
     SURFACE_VARS,
+    _approx_hybrid_to_pressure_hpa,
+    _build_level_indices,
     _compute_rh_from_td,
     _deaccumulate,
     _ev_flat,
@@ -38,6 +40,7 @@ from lsmfapi.collectors.icon_ch1_eps import (
 )
 from lsmfapi.config import get_config
 from lsmfapi.database.cache import set_station_altitude_winds, set_station_forecast
+from lsmfapi.database import collection_state as _cs
 from lsmfapi.models.forecast import (
     AltitudeWindLevel,
     AltitudeWindsProfile,
@@ -204,6 +207,7 @@ class IconCh2EpsCollector(BaseCollector):
                 n_surf = len(SURFACE_VARS) * len(HORIZONS)
                 n_pres = len(PRESSURE_VARS) * len(HORIZONS) if has_pressure_levels else 0
                 progress = [0, n_surf + n_pres]
+                _cs.mark_running("ch2", ref_dt, n_surf + n_pres)
 
                 async def fetch(var: str, h: int) -> np.ndarray | None:
                     try:
@@ -213,6 +217,7 @@ class IconCh2EpsCollector(BaseCollector):
                     finally:
                         progress[0] += 1
                         done, total = progress
+                        _cs.mark_progress("ch2", done)
                         if done % 20 == 0 or done == total:
                             logger.info("CH2 %d/%d (%s h=%d)", done, total, var, h)
 
@@ -291,7 +296,11 @@ class IconCh2EpsCollector(BaseCollector):
             t_c = t_2m - 273.15
             pmsl_hpa = pmsl / 100.0
 
-            level_indices: dict[int, int] = {int(round(h)): i for i, h in enumerate(level_hpa)}
+            level_indices: dict[int, int] = _build_level_indices(level_hpa)
+            logger.info(
+                "CH2 level_indices (target_hpa→arr_idx): %s",
+                {k: v for k, v in sorted(level_indices.items())},
+            )
             alt_m_order = sorted(ALTITUDE_TO_HPA.keys())
 
             for s_idx, station in enumerate(stations):

@@ -11,3 +11,17 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.lsmfapi.rule=Host(`lsmfapi.lg4.ch`)"
+      - "traefik.http.routers.lsmfapi.entrypoints=websecure"
+      - "traefik.http.routers.lsmfapi.tls=true"
+      - "traefik.http.routers.lsmfapi.tls.certresolver=letsencrypt"
+      - "traefik.http.services.lsmfapi.loadbalancer.server.port=8000"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    external: true

@@ -14,6 +14,7 @@ from scipy.spatial import cKDTree
 from lsmfapi.collectors.base import BaseCollector
 from lsmfapi.config import get_config
 from lsmfapi.database.cache import set_grid_wind_cache, set_station_altitude_winds, set_station_forecast
+from lsmfapi.database import collection_state as _cs
 from lsmfapi.models.forecast import (
     AltitudeWindLevel,
     AltitudeWindsProfile,
@@ -214,6 +215,44 @@ def _read_grid_coords(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return lats, lons
 
 
+def _approx_hybrid_to_pressure_hpa(
+    unique_levels: list[int],
+    pv: np.ndarray,
+    p_surf_pa: float = 101325.0,
+) -> np.ndarray:
+    """Convert ICON generalVerticalLayer indices to approximate pressure in hPa.
+
+    ICON hybrid coordinate: p(k) = 0.5*[(ak[k-1]+bk[k-1]*p_surf)+(ak[k]+bk[k]*p_surf)]
+    pv layout: [ak_0 ... ak_N, bk_0 ... bk_N]  (N+1 half-levels, Pa / dimensionless).
+    """
+    n_half = len(pv) // 2
+    ak = pv[:n_half]
+    bk = pv[n_half:]
+    result = []
+    for lvl in unique_levels:
+        k = int(lvl)
+        if 1 <= k <= n_half - 1:
+            p_above = ak[k - 1] + bk[k - 1] * p_surf_pa
+            p_below = ak[k]     + bk[k]     * p_surf_pa
+            result.append(0.5 * (p_above + p_below) / 100.0)
+        else:
+            result.append(float(lvl))  # fallback: treat as hPa
+    return np.array(result, dtype=float)
+
+
+def _build_level_indices(level_hpa: np.ndarray) -> dict[int, int]:
+    """Map each altitude target pressure (ALTITUDE_TO_HPA values) to nearest level index.
+
+    Uses nearest-match so it works for both isobaricInhPa (exact values) and
+    generalVerticalLayer (approximate pressures from hybrid coordinate conversion).
+    """
+    result = {}
+    for target_hpa in ALTITUDE_TO_HPA.values():
+        idx = int(np.argmin(np.abs(level_hpa - target_hpa)))
+        result[target_hpa] = idx
+    return result
+
+
 def _read_grib2_eccodes(
     path: Path,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -223,8 +262,13 @@ def _read_grib2_eccodes(
       Surface  : (n_members, n_points)
       Multi-lev: (n_members, n_levels, n_points)
     level_hpa  : None for surface, ndarray of hPa for pressure-level files.
+                 For generalVerticalLayer files the hPa values are approximated
+                 from the embedded hybrid (pv) coordinate at standard sea-level
+                 pressure — use _build_level_indices() for a nearest-match lookup.
     """
     messages: list[tuple[int, int, np.ndarray]] = []
+    _pv: np.ndarray | None = None
+    _level_type: str = ""
 
     try:
         with open(str(path), "rb") as f:
@@ -236,6 +280,13 @@ def _read_grib2_eccodes(
                     member = int(_eccodes_get(msg, "perturbationNumber", default=0))
                     level  = int(_eccodes_get(msg, "level", default=0))
                     values = eccodes.codes_get_array(msg, "values").astype(np.float32)
+                    if not _level_type:
+                        _level_type = _eccodes_get(msg, "typeOfLevel", default="") or ""
+                        if _level_type == "generalVerticalLayer" and _pv is None:
+                            try:
+                                _pv = eccodes.codes_get_array(msg, "pv").astype(np.float64)
+                            except Exception:
+                                pass
                     messages.append((member, level, values))
                 finally:
                     eccodes.codes_release(msg)
@@ -265,7 +316,15 @@ def _read_grib2_eccodes(
         )
         for member, level, values in messages:
             arr[member_idx[member], level_idx[level]] = values
-        return arr, np.array(unique_levels, dtype=float)
+        if _level_type == "generalVerticalLayer" and _pv is not None:
+            level_coords = _approx_hybrid_to_pressure_hpa(unique_levels, _pv)
+            logger.debug(
+                "generalVerticalLayer: %d levels, approx hPa range [%.0f, %.0f]",
+                len(level_coords), level_coords.min(), level_coords.max(),
+            )
+        else:
+            level_coords = np.array(unique_levels, dtype=float)
+        return arr, level_coords
 
 
 def _extract_station(arr: np.ndarray, flat_idx: int) -> np.ndarray:
@@ -563,6 +622,7 @@ class IconCh1EpsCollector(BaseCollector):
                 n_surf = len(SURFACE_VARS) * len(HORIZONS)
                 n_pres = len(PRESSURE_VARS) * len(HORIZONS) if has_pressure_levels else 0
                 progress = [0, n_surf + n_pres]
+                _cs.mark_running("ch1", ref_dt, n_surf + n_pres)
 
                 async def fetch(var: str, h: int) -> np.ndarray | None:
                     # Keep U/V (pressure-level wind) and T_2M/TD_2M (surface humidity)
@@ -576,6 +636,7 @@ class IconCh1EpsCollector(BaseCollector):
                     finally:
                         progress[0] += 1
                         done, total = progress
+                        _cs.mark_progress("ch1", done)
                         if done % 20 == 0 or done == total:
                             logger.info("CH1 %d/%d (%s h=%d)", done, total, var, h)
 
@@ -654,7 +715,11 @@ class IconCh1EpsCollector(BaseCollector):
             t_c      = t_2m - 273.15
             pmsl_hpa = pmsl / 100.0
 
-            level_indices: dict[int, int] = {int(round(h)): i for i, h in enumerate(level_hpa)}
+            level_indices: dict[int, int] = _build_level_indices(level_hpa)
+            logger.info(
+                "CH1 level_indices (target_hpa→arr_idx): %s",
+                {k: v for k, v in sorted(level_indices.items())},
+            )
             alt_m_order = sorted(ALTITUDE_TO_HPA.keys())
 
             for s_idx, station in enumerate(stations):

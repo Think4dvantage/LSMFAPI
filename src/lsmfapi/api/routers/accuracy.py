@@ -12,6 +12,11 @@ async def accuracy_page() -> FileResponse:
     return FileResponse("static/index.html")
 
 
+@router.get("/data", include_in_schema=False)
+async def data_inspector_page() -> FileResponse:
+    return FileResponse("static/data.html")
+
+
 @router.get("/api/meta")
 async def meta() -> dict:
     cfg = get_config()

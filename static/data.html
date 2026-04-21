@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LSMFAPI — Data Inspector</title>
+  <link rel="stylesheet" href="/static/shared.css">
+  <style>
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+    .tab-btn {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 8px 16px;
+      margin-bottom: -1px;
+    }
+    .tab-btn:hover {
+      background: none;
+      color: var(--text);
+    }
+    .tab-btn.active {
+      border-bottom-color: var(--accent);
+      color: var(--text);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    pre#station-json,
+    pre#wind-json {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      max-height: 70vh;
+      overflow: auto;
+      padding: 16px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .status-bar {
+      color: var(--text-muted);
+      font-size: 12px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LSMFAPI</h1>
+    <nav>
+      <a href="/accuracy">Accuracy Analysis</a>
+      <a href="/data" class="active" style="margin-left:12px;">Data Inspector</a>
+      <a href="/dashboard" style="margin-left:12px;">Dashboard</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="station">Station Forecast</button>
+      <button class="tab-btn" data-tab="wind">Wind Forecast Grid</button>
+    </div>
+
+    <!-- Station Forecast tab -->
+    <div class="tab-panel active" id="tab-station">
+      <div class="card">
+        <div class="form-row">
+          <div class="form-group">
+            <label for="station-select">Station</label>
+            <select id="station-select">
+              <option value="">Loading stations…</option>
+            </select>
+          </div>
+          <button id="station-load-btn" disabled>Load</button>
+        </div>
+        <p id="station-error" class="error" style="margin-top:8px;display:none;"></p>
+      </div>
+      <div id="station-result" style="display:none;">
+        <p class="status-bar" id="station-status"></p>
+        <pre id="station-json"></pre>
+      </div>
+      <p id="station-loading" class="muted" style="display:none;">Loading…</p>
+    </div>
+
+    <!-- Wind Forecast Grid tab -->
+    <div class="tab-panel" id="tab-wind">
+      <div class="card">
+        <div class="form-row">
+          <div class="form-group">
+            <label for="level-select">Altitude level (m ASL)</label>
+            <select id="level-select">
+              <option value="500">500 m</option>
+              <option value="1000">1000 m</option>
+              <option value="1500">1500 m</option>
+              <option value="2000" selected>2000 m</option>
+              <option value="2500">2500 m</option>
+              <option value="3000">3000 m</option>
+              <option value="4000">4000 m</option>
+              <option value="5000">5000 m</option>
+            </select>
+          </div>
+          <button id="wind-load-btn">Load</button>
+        </div>
+        <p id="wind-error" class="error" style="margin-top:8px;display:none;"></p>
+      </div>
+      <div id="wind-result" style="display:none;">
+        <p class="status-bar" id="wind-status"></p>
+        <pre id="wind-json"></pre>
+      </div>
+      <p id="wind-loading" class="muted" style="display:none;">Loading…</p>
+    </div>
+  </main>
+
+  <script src="/static/data.js"></script>
+</body>
+</html>

@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LSMFAPI — Dashboard</title>
+  <link rel="stylesheet" href="/static/shared.css">
+  <style>
+    .section-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .stat-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px 16px;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
+
+    .stat-value {
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.2;
+    }
+
+    .stat-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 3px;
+    }
+
+    .badge {
+      display: inline-block;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .badge-ok      { background: rgba(63, 185, 80, 0.15); color: var(--success); }
+    .badge-warn    { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
+    .badge-err     { background: rgba(248, 81, 73, 0.15);  color: var(--danger);  }
+    .badge-running { background: rgba(56, 139, 253, 0.15); color: var(--accent);  }
+    .badge-idle    { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+
+    .model-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    @media (max-width: 700px) {
+      .model-grid { grid-template-columns: 1fr; }
+    }
+
+    .model-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px 16px;
+    }
+
+    .model-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .model-name {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .model-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      padding: 3px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .model-row:last-child { border-bottom: none; }
+
+    .model-row-label { color: var(--text-muted); }
+
+    .progress-wrap {
+      margin-top: 8px;
+    }
+
+    .progress-bar-bg {
+      background: var(--border);
+      border-radius: 3px;
+      height: 6px;
+      overflow: hidden;
+    }
+
+    .progress-bar-fill {
+      background: var(--accent);
+      border-radius: 3px;
+      height: 6px;
+      transition: width 0.4s ease;
+    }
+
+    .progress-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 3px;
+    }
+
+    .refresh-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+    }
+
+    .dot-warn { background: var(--warning); }
+    .dot-err  { background: var(--danger); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LSMFAPI</h1>
+    <nav>
+      <a href="/accuracy">Accuracy Analysis</a>
+      <a href="/data" style="margin-left:12px;">Data Inspector</a>
+      <a href="/dashboard" class="active" style="margin-left:12px;">Dashboard</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="refresh-bar">
+      <span id="refresh-dot" class="dot"></span>
+      <span id="refresh-status">Loading…</span>
+      <span style="margin-left:auto;">Auto-refresh every 10 s</span>
+    </div>
+
+    <!-- Overview stats -->
+    <div class="section-title">Overview</div>
+    <div class="stat-grid" id="overview-grid">
+      <div class="stat-card"><div class="stat-label">Stations with data</div><div class="stat-value" id="ov-stations">—</div><div class="stat-sub" id="ov-stations-sub"></div></div>
+      <div class="stat-card"><div class="stat-label">Altitude wind profiles</div><div class="stat-value" id="ov-altwinds">—</div></div>
+      <div class="stat-card"><div class="stat-label">Grid points</div><div class="stat-value" id="ov-grid-pts">—</div><div class="stat-sub" id="ov-grid-sub"></div></div>
+      <div class="stat-card"><div class="stat-label">Forecast horizon</div><div class="stat-value" id="ov-horizon">—</div><div class="stat-sub" id="ov-horizon-sub"></div></div>
+      <div class="stat-card"><div class="stat-label">API requests (session)</div><div class="stat-value" id="ov-requests">—</div><div class="stat-sub" id="ov-requests-sub"></div></div>
+      <div class="stat-card"><div class="stat-label">API errors (session)</div><div class="stat-value" id="ov-errors">—</div><div class="stat-sub" id="ov-errors-sub"></div></div>
+    </div>
+
+    <!-- Collection runs -->
+    <div class="section-title">Collection Runs</div>
+    <div class="model-grid">
+      <div class="model-card" id="col-ch1">
+        <div class="model-header">
+          <span class="model-name">ICON-CH1-EPS</span>
+          <span class="badge badge-idle" id="col-ch1-badge">—</span>
+        </div>
+        <div id="col-ch1-progress" style="display:none;" class="progress-wrap">
+          <div class="progress-bar-bg"><div class="progress-bar-fill" id="col-ch1-bar" style="width:0%"></div></div>
+          <div class="progress-label" id="col-ch1-prog-label"></div>
+        </div>
+        <div id="col-ch1-rows"></div>
+      </div>
+      <div class="model-card" id="col-ch2">
+        <div class="model-header">
+          <span class="model-name">ICON-CH2-EPS</span>
+          <span class="badge badge-idle" id="col-ch2-badge">—</span>
+        </div>
+        <div id="col-ch2-progress" style="display:none;" class="progress-wrap">
+          <div class="progress-bar-bg"><div class="progress-bar-fill" id="col-ch2-bar" style="width:0%"></div></div>
+          <div class="progress-label" id="col-ch2-prog-label"></div>
+        </div>
+        <div id="col-ch2-rows"></div>
+      </div>
+    </div>
+
+    <!-- Cache detail -->
+    <div class="section-title">Cache Detail</div>
+    <div class="model-grid">
+      <div class="model-card">
+        <div class="model-header">
+          <span class="model-name">Station Cache</span>
+          <span class="badge" id="cache-station-badge">—</span>
+        </div>
+        <div id="cache-station-rows"></div>
+      </div>
+      <div class="model-card">
+        <div class="model-header">
+          <span class="model-name">Wind Grid Cache</span>
+          <span class="badge" id="cache-grid-badge">—</span>
+        </div>
+        <div id="cache-grid-rows"></div>
+      </div>
+    </div>
+
+    <!-- Recent errors -->
+    <div class="section-title">Recent Errors (last 20)</div>
+    <div class="card" style="padding:0;overflow:hidden;">
+      <div id="errors-empty" class="muted" style="padding:16px;display:none;">No errors recorded this session.</div>
+      <table id="errors-table" style="display:none;">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Method</th>
+            <th>Path</th>
+            <th>Status</th>
+            <th>Detail</th>
+          </tr>
+        </thead>
+        <tbody id="errors-tbody"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
