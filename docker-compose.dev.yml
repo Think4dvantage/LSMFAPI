@@ -1,5 +1,7 @@
 services:
   lsmfapi:
+    build: .
+    image: lsmfapi:dev
     volumes:
       - ./src:/app/src:ro,z
       - ./static:/app/static:ro,z

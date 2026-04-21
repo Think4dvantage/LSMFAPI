@@ -1,6 +1,6 @@
 services:
   lsmfapi:
-    build: .
+    image: ghcr.io/think4dvantage/lsmfapi:latest
     restart: unless-stopped
     volumes:
       - ./config.yml:/app/config.yml:ro
