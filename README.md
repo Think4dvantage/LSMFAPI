@@ -122,7 +122,7 @@ LSMFAPI ingests two MeteoSwiss high-resolution ensemble models downloaded via th
 | ICON-CH1-EPS | 1.1 km | 0–30 h | 4 (00Z/06Z/12Z/18Z) | 11 |
 | ICON-CH2-EPS | 2.2 km | 30–120 h | 2 (00Z/12Z) | 21 |
 
-**Blending rule**: hours 0–30 use CH1-EPS (higher resolution); hours 30–120 use CH2-EPS.
+**Blending rule**: hours 0–30 from CH1-EPS (hourly, 1.1 km resolution); hours 33–120 from CH2-EPS (3h steps). Both models are cached independently and merged at read time — a CH1 re-run refreshes only the near-term slice; the CH2 long-range tail is unaffected, and vice versa.
 
 See `docs/forecast-data-reference.md` for a plain-English explanation of what each variable means and how to interpret ensemble spread.
 
@@ -145,7 +145,7 @@ MeteoSwiss STAC API → GRIB2 files (one per variable per step)
   → Compute RH from specific humidity + temperature + pressure
   → Ensemble engine: median, min, max across all members × runs
   → Precompute ForecastResponse for every known station
-  → Store in in-memory dict (keyed by lat_lon_elev)
+  → Store in separate CH1/CH2 in-memory dicts (keyed by station_id)
 
 API routes
   → Dict lookup — no on-the-fly computation
@@ -188,10 +188,9 @@ static/
 
 ### In-memory cache
 
-Forecast data is held in a Python in-process dict — there is no time-series database. The cache is populated on container startup and refreshed after every collection run. API calls are pure dict lookups with no on-the-fly computation.
+Forecast data is held in Python in-process dicts — there is no time-series database. CH1 and CH2 data are stored in separate dicts and merged at read time: `get_station_forecast()` returns the CH1 hourly head (h0–h30) concatenated with the CH2 3h-step tail (h33–h120). Each collector only ever refreshes its own dict, so re-runs don't erase the other model's data.
 
-- Station cache key: `"{lat}_{lon}_{elev}"` → `ForecastResponse`
-- Grid cache key: `"{YYYY-MM-DD}_{level_m}"` → `GridResponse`
+The cache is populated on container startup and refreshed after every collection run. API calls are pure dict lookups + in-memory merge with no on-the-fly computation. The cache is persisted to `/app/data/cache.json` after each run and restored on restart.
 
 All cache access goes through `database/cache.py` getter/setter functions so the backing store can be swapped to Redis later without touching router code.
 
@@ -247,7 +246,7 @@ healthcheck:
 
 ## Roadmap
 
-### v0.1 — MVP (in progress)
+### v0.1 — MVP ✅ Shipped
 
 - ICON-CH1-EPS + CH2-EPS collectors via MeteoSwiss STAC API
 - Full variable set: winds, temperature, humidity, pressure, precipitation, radiation, cloud cover, boundary layer height, CAPE/CIN, freezing level, vertical wind at 9 altitude bands
@@ -255,14 +254,22 @@ healthcheck:
 - Accuracy analysis GUI
 - Docker + docker-compose + Traefik
 
-### v0.2 — Recipes
+### v0.2 — Dashboard + cache merge ✅ Shipped
+
+- Operational dashboard with live collection status and cache health
+- Data Inspector GUI
+- Wind grid fully functional
+- GitHub Actions Docker pipeline + remote deploy script
+- CH1/CH2 cache merge: CH1 hourly head (h0–h30) + CH2 3h tail (h33–h120) served as a single blended response
+
+### v0.3 — Recipes
 
 - `Recipe` + `RecipeRule` SQLite models
 - CRUD endpoints (`GET/POST/PUT/DELETE /api/recipes`)
 - Recipe engine: apply additive/multiplicative corrections in `/api/forecast/station`
 - Recipe editor GUI
 
-### v0.3 — Enhancements
+### v0.4 — Enhancements
 
 - Bilinear interpolation for smoother station-level values
 - Statistical recipe suggestions (auto-compute mean bias from accuracy data)

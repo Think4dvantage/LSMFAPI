@@ -59,7 +59,8 @@ SURFACE_VARS: list[str] = [
 ]
 ACCUM_VARS: frozenset[str] = frozenset({"TOT_PREC", "DURSUN", "ASWDIR_S", "ASWDIFD_S"})
 
-PRESSURE_VARS: list[str] = ["U", "V", "W"]
+PRESSURE_VARS: list[str] = ["U", "V", "W"]   # full set used by CH2
+CH1_PRESSURE_VARS: list[str] = ["U", "V"]    # W omitted — CH1 altitude winds are null; U/V needed for grid
 ALTITUDE_TO_HPA: dict[int, int] = {
     500: 950, 800: 920, 1000: 900, 1500: 850, 2000: 800,
     2500: 750, 3000: 700, 4000: 600, 5000: 500,
@@ -332,6 +333,121 @@ def _extract_station(arr: np.ndarray, flat_idx: int) -> np.ndarray:
     return arr[..., flat_idx]
 
 
+# ---------- Shared grid helper (used by CH1 and CH2 collectors) ----------
+
+def _build_grid_wind_cache(
+    horizons: list[int],
+    ref_dt: datetime,
+    tmpdir: Path,
+    level_indices: dict[int, int],
+    sample_indices: np.ndarray,
+    n_lat: int,
+    n_lon: int,
+    model: str,
+) -> GridWindCache:
+    """Build a GridWindCache from U/V/T_2M/TD_2M GRIBs kept on disk in tmpdir.
+
+    Reads one horizon at a time and deletes each file immediately after extraction.
+    Called by both IconCh1EpsCollector and IconCh2EpsCollector.
+    """
+    n_grid = len(sample_indices)
+    n_horizons = len(horizons)
+    alt_m_order = sorted(ALTITUDE_TO_HPA.keys())
+
+    ws_cache: dict[int, np.ndarray] = {
+        alt_m: np.full((n_horizons, n_grid), np.nan, dtype=np.float32) for alt_m in alt_m_order
+    }
+    wd_cache: dict[int, np.ndarray] = {
+        alt_m: np.full((n_horizons, n_grid), np.nan, dtype=np.float32) for alt_m in alt_m_order
+    }
+    rh_cache = np.full((n_horizons, n_grid), np.nan, dtype=np.float32)
+
+    for h_idx, h in enumerate(horizons):
+        u_grid: np.ndarray | None = None
+        v_grid: np.ndarray | None = None
+
+        for var in ("U", "V"):
+            dest = tmpdir / f"{var}_{h:03d}.grib2"
+            if not dest.exists():
+                continue
+            try:
+                arr, _ = _read_grib2_eccodes(dest)
+                if arr is None or arr.ndim < 3:
+                    continue
+                extracted = arr[:, :, sample_indices]  # (n_members, n_levels, n_grid)
+                if var == "U":
+                    u_grid = extracted
+                else:
+                    v_grid = extracted
+            except Exception as exc:
+                logger.warning("Grid parse %s h=%d: %s", var, h, exc)
+            finally:
+                dest.unlink(missing_ok=True)
+
+        if u_grid is not None and v_grid is not None:
+            for alt_m in alt_m_order:
+                l_idx = level_indices.get(ALTITUDE_TO_HPA[alt_m])
+                if l_idx is None:
+                    continue
+                u = u_grid[:, l_idx, :].astype(np.float64)
+                v = v_grid[:, l_idx, :].astype(np.float64)
+                speeds = np.sqrt(u ** 2 + v ** 2) * 3.6
+                dirs = (270.0 - np.degrees(np.arctan2(v, u))) % 360.0
+                rad = np.deg2rad(dirs)
+                ws_cache[alt_m][h_idx] = np.nanmedian(speeds, axis=0).astype(np.float32)
+                wd_cache[alt_m][h_idx] = (np.degrees(np.arctan2(
+                    np.nanmedian(np.sin(rad), axis=0),
+                    np.nanmedian(np.cos(rad), axis=0),
+                )) % 360.0).astype(np.float32)
+
+        t_dest  = tmpdir / f"T_2M_{h:03d}.grib2"
+        td_dest = tmpdir / f"TD_2M_{h:03d}.grib2"
+        t_arr: np.ndarray | None = None
+        td_arr: np.ndarray | None = None
+        for dest, store in ((t_dest, "t"), (td_dest, "td")):
+            if not dest.exists():
+                continue
+            try:
+                arr, _ = _read_grib2_eccodes(dest)
+                if arr is not None and arr.ndim == 2:
+                    if store == "t":
+                        t_arr = arr[:, sample_indices]
+                    else:
+                        td_arr = arr[:, sample_indices]
+            except Exception as exc:
+                logger.warning("Grid parse %s h=%d: %s", dest.name, h, exc)
+            finally:
+                dest.unlink(missing_ok=True)
+
+        if t_arr is not None and td_arr is not None:
+            rh_members = _compute_rh_from_td(
+                t_arr.astype(np.float64), td_arr.astype(np.float64),
+            )
+            rh_cache[h_idx] = np.nanmedian(rh_members, axis=0).astype(np.float32)
+
+        logger.debug("Grid %s h=%d computed", model, h)
+
+    lat_arr = np.arange(GRID_LAT_MAX, GRID_LAT_MIN - GRID_STEP_DEG / 2, -GRID_STEP_DEG)
+    lon_arr = np.arange(GRID_LON_MIN, GRID_LON_MAX + GRID_STEP_DEG / 2, GRID_STEP_DEG)
+    lon_grid_2d, lat_grid_2d = np.meshgrid(lon_arr, lat_arr)
+
+    return GridWindCache(
+        model=model,
+        init_time=ref_dt,
+        lats=lat_grid_2d.ravel().astype(np.float32),
+        lons=lon_grid_2d.ravel().astype(np.float32),
+        n_lat=n_lat,
+        n_lon=n_lon,
+        lat_max=float(lat_arr[0]),
+        lon_min=float(lon_arr[0]),
+        step_deg=GRID_STEP_DEG,
+        valid_times=[ref_dt + timedelta(hours=h) for h in horizons],
+        ws=ws_cache,
+        wd=wd_cache,
+        rh=rh_cache,
+    )
+
+
 # ---------- Collector ----------
 
 class IconCh1EpsCollector(BaseCollector):
@@ -453,125 +569,17 @@ class IconCh1EpsCollector(BaseCollector):
         tmpdir: Path,
         level_indices: dict[int, int],
     ) -> None:
-        """Build GridWindCache from U/V GRIBs already on disk in tmpdir.
-
-        Files were kept by _fetch_step(keep=True) during station collection.
-        Reads one horizon at a time (peak ~2 GRIBs in memory), deletes each
-        file immediately after extraction.
-
-        Note: ~2–3 GB of temp disk is consumed while the files sit in tmpdir
-        waiting for station processing to finish — the trade-off for avoiding
-        a second download pass.
-        """
         if _GRID_SAMPLE_INDICES is None:
-            logger.info("Grid sample indices not available; skipping grid collection")
+            logger.info("Grid sample indices not available; skipping CH1 grid collection")
             return
-
-        n_grid = len(_GRID_SAMPLE_INDICES)
-        n_horizons = len(HORIZONS)
-        alt_m_order = sorted(ALTITUDE_TO_HPA.keys())
-
-        ws_cache: dict[int, np.ndarray] = {
-            alt_m: np.full((n_horizons, n_grid), np.nan, dtype=np.float32)
-            for alt_m in alt_m_order
-        }
-        wd_cache: dict[int, np.ndarray] = {
-            alt_m: np.full((n_horizons, n_grid), np.nan, dtype=np.float32)
-            for alt_m in alt_m_order
-        }
-        rh_cache = np.full((n_horizons, n_grid), np.nan, dtype=np.float32)
-
-        for h_idx, h in enumerate(HORIZONS):
-            u_grid: np.ndarray | None = None
-            v_grid: np.ndarray | None = None
-
-            for var in ("U", "V"):
-                dest = tmpdir / f"{var}_{h:03d}.grib2"
-                if not dest.exists():
-                    continue
-                try:
-                    arr, _ = _read_grib2_eccodes(dest)
-                    if arr is None or arr.ndim < 3:
-                        continue
-                    # arr: (n_members, n_levels, n_points)
-                    extracted = arr[:, :, _GRID_SAMPLE_INDICES]  # (n_members, n_levels, n_grid)
-                    if var == "U":
-                        u_grid = extracted
-                    else:
-                        v_grid = extracted
-                except Exception as exc:
-                    logger.warning("Grid parse %s h=%d: %s", var, h, exc)
-                finally:
-                    dest.unlink(missing_ok=True)
-
-            if u_grid is None or v_grid is None:
-                continue
-
-            for alt_m in alt_m_order:
-                l_idx = level_indices.get(ALTITUDE_TO_HPA[alt_m])
-                if l_idx is None:
-                    continue
-                u = u_grid[:, l_idx, :].astype(np.float64)  # (n_members, n_grid)
-                v = v_grid[:, l_idx, :].astype(np.float64)
-                speeds = np.sqrt(u ** 2 + v ** 2) * 3.6      # m/s → km/h
-                dirs = (270.0 - np.degrees(np.arctan2(v, u))) % 360.0
-                rad = np.deg2rad(dirs)
-                ws_cache[alt_m][h_idx] = np.nanmedian(speeds, axis=0).astype(np.float32)
-                wd_cache[alt_m][h_idx] = (np.degrees(np.arctan2(
-                    np.nanmedian(np.sin(rad), axis=0),
-                    np.nanmedian(np.cos(rad), axis=0),
-                )) % 360.0).astype(np.float32)
-
-            # Surface humidity — T_2M and TD_2M are (n_members, n_points)
-            t_dest  = tmpdir / f"T_2M_{h:03d}.grib2"
-            td_dest = tmpdir / f"TD_2M_{h:03d}.grib2"
-            t_arr: np.ndarray | None = None
-            td_arr: np.ndarray | None = None
-            for dest, store in ((t_dest, "t"), (td_dest, "td")):
-                if not dest.exists():
-                    continue
-                try:
-                    arr, _ = _read_grib2_eccodes(dest)
-                    if arr is not None and arr.ndim == 2:
-                        if store == "t":
-                            t_arr = arr[:, _GRID_SAMPLE_INDICES]   # (n_members, n_grid)
-                        else:
-                            td_arr = arr[:, _GRID_SAMPLE_INDICES]
-                except Exception as exc:
-                    logger.warning("Grid parse %s h=%d: %s", dest.name, h, exc)
-                finally:
-                    dest.unlink(missing_ok=True)
-
-            if t_arr is not None and td_arr is not None:
-                rh_members = _compute_rh_from_td(
-                    t_arr.astype(np.float64),
-                    td_arr.astype(np.float64),
-                )  # (n_members, n_grid)
-                rh_cache[h_idx] = np.nanmedian(rh_members, axis=0).astype(np.float32)
-
-            logger.debug("Grid h=%d computed for %d levels", h, len(alt_m_order))
-
-        lat_arr = np.arange(GRID_LAT_MAX, GRID_LAT_MIN - GRID_STEP_DEG / 2, -GRID_STEP_DEG)
-        lon_arr = np.arange(GRID_LON_MIN, GRID_LON_MAX + GRID_STEP_DEG / 2, GRID_STEP_DEG)
-        lon_grid_2d, lat_grid_2d = np.meshgrid(lon_arr, lat_arr)
-
-        set_grid_wind_cache(GridWindCache(
-            init_time=ref_dt,
-            lats=lat_grid_2d.ravel().astype(np.float32),
-            lons=lon_grid_2d.ravel().astype(np.float32),
-            n_lat=_GRID_N_LAT,
-            n_lon=_GRID_N_LON,
-            lat_max=float(lat_arr[0]),
-            lon_min=float(lon_arr[0]),
-            step_deg=GRID_STEP_DEG,
-            valid_times=[ref_dt + timedelta(hours=h) for h in HORIZONS],
-            ws=ws_cache,
-            wd=wd_cache,
-            rh=rh_cache,
-        ))
+        cache = _build_grid_wind_cache(
+            HORIZONS, ref_dt, tmpdir, level_indices,
+            _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, "icon-ch1",
+        )
+        set_grid_wind_cache(cache)
         logger.info(
-            "GridWindCache set: %d × %d points, %d levels, init_time=%s",
-            _GRID_N_LAT, _GRID_N_LON, len(alt_m_order), ref_dt.isoformat(),
+            "CH1 GridWindCache set: %d × %d points, %d levels, %d frames, init_time=%s",
+            _GRID_N_LAT, _GRID_N_LON, len(ALTITUDE_TO_HPA), len(HORIZONS), ref_dt.isoformat(),
         )
 
     async def collect(self) -> None:  # noqa: C901
@@ -620,13 +628,12 @@ class IconCh1EpsCollector(BaseCollector):
                 has_pressure_levels = u0_url is not None
 
                 n_surf = len(SURFACE_VARS) * len(HORIZONS)
-                n_pres = len(PRESSURE_VARS) * len(HORIZONS) if has_pressure_levels else 0
+                n_pres = len(CH1_PRESSURE_VARS) * len(HORIZONS) if has_pressure_levels else 0
                 progress = [0, n_surf + n_pres]
                 _cs.mark_running("ch1", ref_dt, n_surf + n_pres)
 
                 async def fetch(var: str, h: int) -> np.ndarray | None:
-                    # Keep U/V (pressure-level wind) and T_2M/TD_2M (surface humidity)
-                    # on disk so collect_grid() can read them without re-downloading
+                    # Keep U/V and T_2M/TD_2M on disk for collect_grid()
                     keep = var in ("U", "V", "T_2M", "TD_2M")
                     try:
                         return await self._fetch_step(
@@ -645,9 +652,9 @@ class IconCh1EpsCollector(BaseCollector):
                     for h in HORIZONS:
                         surf_tasks[var].append(asyncio.ensure_future(fetch(var, h)))
 
-                pres_tasks: dict[str, list[asyncio.Task]] = {v: [] for v in PRESSURE_VARS}
+                pres_tasks: dict[str, list[asyncio.Task]] = {v: [] for v in CH1_PRESSURE_VARS}
                 if has_pressure_levels:
-                    for var in PRESSURE_VARS:
+                    for var in CH1_PRESSURE_VARS:
                         for h in HORIZONS:
                             pres_tasks[var].append(asyncio.ensure_future(fetch(var, h)))
 
@@ -675,17 +682,23 @@ class IconCh1EpsCollector(BaseCollector):
                     r = task.result() if not task.cancelled() else None
                     if isinstance(r, np.ndarray) and r.ndim == 3:
                         r = r[:, -1, :]
-                    steps.append(r if isinstance(r, np.ndarray) and r.ndim == 2 else nan_surf)
+                    steps.append(
+                        r if isinstance(r, np.ndarray) and r.shape == nan_surf.shape
+                        else nan_surf
+                    )
                 return np.stack(steps, axis=0)
 
             def pres_array(var: str) -> np.ndarray:
-                if not pres_tasks[var]:
+                if not pres_tasks.get(var):
                     return np.full((len(HORIZONS), N_MEMBERS, len(level_hpa), n_stations), np.nan)
                 nan_pres = np.full((N_MEMBERS, len(level_hpa), n_stations), np.nan)
                 steps = []
                 for task in pres_tasks[var]:
                     r = task.result() if not task.cancelled() else None
-                    steps.append(r if isinstance(r, np.ndarray) and r.ndim >= 3 else nan_pres)
+                    steps.append(
+                        r if isinstance(r, np.ndarray) and r.shape == nan_pres.shape
+                        else nan_pres
+                    )
                 return np.stack(steps, axis=0)
 
             u_10m = surf_array("U_10M");   v_10m = surf_array("V_10M")

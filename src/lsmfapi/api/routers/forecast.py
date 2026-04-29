@@ -193,7 +193,7 @@ async def wind_grid(
 
     response = GridForecastResponse(
         init_time=grid_cache.init_time,
-        model="icon-ch1",
+        model=grid_cache.model,
         stride_km=stride_km,
         grid=grid_points,
         frames=frames,

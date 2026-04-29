@@ -64,7 +64,8 @@ function renderOverview(data) {
   const req = data.requests;
 
   setText("ov-stations", sc.count ?? 0);
-  setText("ov-stations-sub", sc.model ? `model: ${sc.model}` : "cache empty");
+  const scModels = [sc.ch1 ? "CH1" : null, sc.ch2 ? "CH2" : null].filter(Boolean).join("+");
+  setText("ov-stations-sub", scModels ? `model: ${scModels}` : "cache empty");
 
   setText("ov-altwinds", aw.count ?? 0);
 
@@ -158,11 +159,11 @@ function renderCacheDetail(data) {
   }
   document.getElementById("cache-station-rows").innerHTML = modelRows([
     ["Stations", sc.count],
-    ["Model", sc.model ?? "—"],
-    ["Init time", fmtDt(sc.init_time)],
-    ["Forecast hours", sc.forecast_hours],
+    ["CH1 (0–30 h, 1 h steps)", sc.ch1 ? `${sc.ch1.forecast_hours} h, init ${fmtDt(sc.ch1.init_time)}` : "—"],
+    ["CH2 (30–120 h, 3 h steps)", sc.ch2 ? `${sc.ch2.forecast_hours} steps, init ${fmtDt(sc.ch2.init_time)}` : "—"],
+    ["Combined forecast entries", sc.combined_forecast_hours],
     ["Valid until", fmtDt(sc.valid_until)],
-    ["Altitude wind profiles", data.altitude_winds_cache.count],
+    ["Altitude wind profiles", `${data.altitude_winds_cache.ch1_count} CH1 + ${data.altitude_winds_cache.ch2_count} CH2`],
   ]);
 
   const grBadge = document.getElementById("cache-grid-badge");

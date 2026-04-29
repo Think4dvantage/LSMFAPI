@@ -23,9 +23,15 @@ from lsmfapi.collectors.icon_ch1_eps import (
     ACCUM_VARS,
     ALTITUDE_TO_HPA,
     DOWNLOAD_CONCURRENCY,
+    GRID_LAT_MAX,
+    GRID_LAT_MIN,
+    GRID_LON_MAX,
+    GRID_LON_MIN,
+    GRID_STEP_DEG,
     PRESSURE_VARS,
     SURFACE_VARS,
     _approx_hybrid_to_pressure_hpa,
+    _build_grid_wind_cache,
     _build_level_indices,
     _compute_rh_from_td,
     _deaccumulate,
@@ -39,7 +45,7 @@ from lsmfapi.collectors.icon_ch1_eps import (
     _wind_ensemble_value,
 )
 from lsmfapi.config import get_config
-from lsmfapi.database.cache import set_station_altitude_winds, set_station_forecast
+from lsmfapi.database.cache import set_grid_wind_cache, set_station_altitude_winds, set_station_forecast
 from lsmfapi.database import collection_state as _cs
 from lsmfapi.models.forecast import (
     AltitudeWindLevel,
@@ -54,6 +60,9 @@ logger = logging.getLogger(__name__)
 
 # ---------- Module-level grid singleton (separate from CH1) ----------
 _GRID_TREE: cKDTree | None = None
+_GRID_SAMPLE_INDICES: np.ndarray | None = None
+_GRID_N_LAT: int = 0
+_GRID_N_LON: int = 0
 
 # ---------- Collection constants ----------
 COLLECTION = "ch.meteoschweiz.ogd-forecasting-icon-ch2"
@@ -76,7 +85,7 @@ class IconCh2EpsCollector(BaseCollector):
     """ICON-CH2-EPS collector — 30–120 h, 2 runs/day (00Z/12Z), 21 members."""
 
     async def _ensure_grid(self, tmpdir: Path) -> None:
-        global _GRID_TREE
+        global _GRID_TREE, _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON
         if _GRID_TREE is not None:
             return
 
@@ -108,6 +117,17 @@ class IconCh2EpsCollector(BaseCollector):
         _GRID_TREE = cKDTree(flat_coords)
         logger.info("CH2 KD-tree built: %d grid points", len(lats))
 
+        lat_arr = np.arange(GRID_LAT_MAX, GRID_LAT_MIN - GRID_STEP_DEG / 2, -GRID_STEP_DEG)
+        lon_arr = np.arange(GRID_LON_MIN, GRID_LON_MAX + GRID_STEP_DEG / 2, GRID_STEP_DEG)
+        _GRID_N_LAT = len(lat_arr)
+        _GRID_N_LON = len(lon_arr)
+        lon_grid, lat_grid = np.meshgrid(lon_arr, lat_arr)
+        _, _GRID_SAMPLE_INDICES = _GRID_TREE.query(np.column_stack([lat_grid.ravel(), lon_grid.ravel()]))
+        logger.info(
+            "CH2 grid sample indices: %d × %d = %d points",
+            _GRID_N_LAT, _GRID_N_LON, len(_GRID_SAMPLE_INDICES),
+        )
+
     async def _fetch_stations(self) -> list[dict]:
         cfg = get_config()
         async with httpx.AsyncClient(timeout=30, verify=False) as client:
@@ -124,6 +144,7 @@ class IconCh2EpsCollector(BaseCollector):
         horizon_h: int,
         station_flat_indices: np.ndarray,
         tmpdir: Path,
+        keep: bool = False,
     ) -> np.ndarray | None:
         cfg = get_config()
         async with semaphore:
@@ -158,7 +179,8 @@ class IconCh2EpsCollector(BaseCollector):
             logger.debug("CH2 data %s h=%d shape=%s", variable, horizon_h, result.shape)
             return result
         finally:
-            dest.unlink(missing_ok=True)
+            if not keep:
+                dest.unlink(missing_ok=True)
 
     async def collect(self) -> None:  # noqa: C901
         ref_dt = _latest_ref_dt_ch2()
@@ -210,9 +232,11 @@ class IconCh2EpsCollector(BaseCollector):
                 _cs.mark_running("ch2", ref_dt, n_surf + n_pres)
 
                 async def fetch(var: str, h: int) -> np.ndarray | None:
+                    keep = var in ("U", "V", "T_2M", "TD_2M")
                     try:
                         return await self._fetch_step(
-                            semaphore, client, ref_dt, var, h, station_flat_indices, tmpdir
+                            semaphore, client, ref_dt, var, h, station_flat_indices, tmpdir,
+                            keep=keep,
                         )
                     finally:
                         progress[0] += 1
@@ -256,7 +280,10 @@ class IconCh2EpsCollector(BaseCollector):
                     r = task.result() if not task.cancelled() else None
                     if isinstance(r, np.ndarray) and r.ndim == 3:
                         r = r[:, -1, :]
-                    steps.append(r if isinstance(r, np.ndarray) and r.ndim == 2 else nan_surf)
+                    steps.append(
+                        r if isinstance(r, np.ndarray) and r.shape == nan_surf.shape
+                        else nan_surf
+                    )
                 return np.stack(steps, axis=0)
 
             def pres_array(var: str) -> np.ndarray:
@@ -266,7 +293,10 @@ class IconCh2EpsCollector(BaseCollector):
                 steps = []
                 for task in pres_tasks[var]:
                     r = task.result() if not task.cancelled() else None
-                    steps.append(r if isinstance(r, np.ndarray) and r.ndim >= 3 else nan_pres)
+                    steps.append(
+                        r if isinstance(r, np.ndarray) and r.shape == nan_pres.shape
+                        else nan_pres
+                    )
                 return np.stack(steps, axis=0)
 
             u_10m = surf_array("U_10M");  v_10m = surf_array("V_10M")
@@ -392,4 +422,28 @@ class IconCh2EpsCollector(BaseCollector):
                 )
                 logger.info("CH2 cached forecast for %s (%d hours)", station_id, len(forecast_list))
 
+            try:
+                self.collect_grid(ref_dt, tmpdir, level_indices)
+            except Exception:
+                logger.exception("CH2 grid collection failed — station data unaffected")
+
         logger.info("IconCh2EpsCollector.collect() complete — %d stations", len(stations))
+
+    def collect_grid(
+        self,
+        ref_dt: datetime,
+        tmpdir: Path,
+        level_indices: dict[int, int],
+    ) -> None:
+        if _GRID_SAMPLE_INDICES is None:
+            logger.info("CH2 grid sample indices not available; skipping grid collection")
+            return
+        cache = _build_grid_wind_cache(
+            HORIZONS, ref_dt, tmpdir, level_indices,
+            _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, "icon-ch2",
+        )
+        set_grid_wind_cache(cache)
+        logger.info(
+            "CH2 GridWindCache set: %d × %d points, %d levels, %d frames, init_time=%s",
+            _GRID_N_LAT, _GRID_N_LON, len(ALTITUDE_TO_HPA), len(HORIZONS), ref_dt.isoformat(),
+        )

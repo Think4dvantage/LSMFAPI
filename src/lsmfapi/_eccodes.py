@@ -1,4 +1,5 @@
 import logging
+import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +11,7 @@ def setup_definitions() -> None:
     COSMO definitions must appear before the vendor (ECMWF) definitions in the path
     so that ICON-specific shortNames (T_2M, U_10M, QV, PMSL …) are resolved correctly.
     """
+    warnings.filterwarnings("ignore", message="ecCodes .* or higher is recommended", module="gribapi")
     import eccodes
     import eccodes_cosmo_resources
 

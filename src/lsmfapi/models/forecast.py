@@ -119,6 +119,7 @@ class GridWindCache:
     lats/lons are row-major (lat descending, lon ascending).
     ws/wd keyed by level_m → (n_frames, N) arrays, km/h / degrees.
     """
+    model: str               # "icon-ch1" or "icon-ch2"
     init_time: datetime
     lats: np.ndarray        # shape (N,)
     lons: np.ndarray        # shape (N,)

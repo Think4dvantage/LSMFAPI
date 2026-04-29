@@ -16,6 +16,7 @@ services:
       - "traefik.http.routers.lsmfapi-dev.entrypoints=websecure"
       - "traefik.http.routers.lsmfapi-dev.tls=true"
       - "traefik.http.routers.lsmfapi-dev.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.lsmfapi-dev.service=lsmfapi-dev"
       - "traefik.http.services.lsmfapi-dev.loadbalancer.server.port=8000"
       - "traefik.docker.network=proxy"
 

@@ -2,19 +2,28 @@
 
 ## In-Memory Forecast Cache
 
-All computed forecast data is held in a Python in-process dict. There is no time-series database.
+All computed forecast data is held in Python in-process dicts. There is no time-series database.
 
-### Station cache
+### Station cache — two-model design
 
 ```python
 # database/cache.py
-_station_cache: dict[str, ForecastResponse] = {}
-# key: "{lat}_{lon}_{elev}"  e.g. "46.68_7.86_580"
+_ch1_station_cache: dict[str, StationForecastResponse] = {}  # CH1: h0–h30, 1 h steps
+_ch2_station_cache: dict[str, StationForecastResponse] = {}  # CH2: h30–h120, 3 h steps
+# key: station_id  (e.g. "meteoswiss-BER")
 ```
+
+CH1 and CH2 are stored independently so each collector can update its own slice without touching the other. `get_station_forecast()` merges them on the fly: all CH1 entries first, then CH2 entries with `valid_time` strictly after the last CH1 `valid_time` (i.e. h30 excluded from CH2, first appended step is h33).
+
+**Priority rule**: `set_station_forecast()` routes by `data.model`:
+- `"icon-ch1"` → written to `_ch1_station_cache` (always overwrites own slice)
+- anything else → written to `_ch2_station_cache` (always overwrites own slice)
+
+This means a CH1 re-run only refreshes the CH1 dict; the CH2 tail remains intact. A CH2 re-run only refreshes the CH2 dict; the CH1 hourly head remains intact.
 
 - Populated after every collection run (CH1-EPS every 3 h, CH2-EPS every 6 h)
 - Also populated once at container startup (immediate collection run triggered in lifespan)
-- A cache entry is a fully computed `ForecastResponse` — API calls are pure dict lookups, no on-the-fly computation
+- API calls are pure dict lookups + in-memory merge, no on-the-fly computation
 - Station list is fetched from the Lenticularis API on startup and refreshed before each collection run
 
 ### Wind grid cache
@@ -41,12 +50,14 @@ Populated alongside `_station_cache` after each collection run.
 
 ```python
 # database/cache.py
-def get_station_forecast(station_key: str) -> ForecastResponse | None: ...
-def set_station_forecast(station_key: str, data: ForecastResponse) -> None: ...
+def get_station_forecast(station_key: str) -> StationForecastResponse | None: ...
+    # Returns merged CH1+CH2 view: CH1 hourly head, CH2 3h-step tail
+def set_station_forecast(station_key: str, data: StationForecastResponse) -> None: ...
+    # Routes to _ch1_station_cache or _ch2_station_cache based on data.model
 def get_station_altitude_winds(station_key: str) -> AltitudeWindsResponse | None: ...
 def set_station_altitude_winds(station_key: str, data: AltitudeWindsResponse) -> None: ...
-def get_grid_forecast(date: str, level_m: int) -> GridResponse | None: ...
-def set_grid_forecast(date: str, level_m: int, data: GridResponse) -> None: ...
+def get_grid_wind_cache() -> GridWindCache | None: ...
+def set_grid_wind_cache(data: GridWindCache) -> None: ...
 def save_cache() -> None: ...   # atomic write to /app/data/cache.json
 def load_cache() -> None: ...   # restore all caches from /app/data/cache.json on startup
 def cache_stats() -> dict: ...  # keys count, last_populated_at — for health/debug
@@ -57,8 +68,12 @@ All reads and writes go through these functions so the backing store can be swap
 ### Cache persistence
 
 `/app/data/cache.json` is written after every successful collection and on graceful shutdown.
-On container startup, `load_cache()` restores all three caches before the scheduler fires —
+On container startup, `load_cache()` restores all caches before the scheduler fires —
 the API serves stale-but-valid data immediately while the background warm-up runs.
+
+JSON keys: `ch1_station`, `ch2_station`, `ch1_altitude_winds`, `ch2_altitude_winds`.
+CH1 and CH2 are saved and loaded independently; a new deploy never loses the CH2 tail just because CH1 hasn't run yet.
+
 Volume mount: `./data:/app/data` (in both compose files). The `./data` directory is excluded
 from the rsync deploy so the remote cache is never overwritten by a deploy.
 

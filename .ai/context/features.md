@@ -1,12 +1,13 @@
 # Feature History & Backlog
 
-## Current Version: v0.1 (shipped)
+## Current Version: v0.2 (shipped)
 
 ### Shipped Milestones
 
 | Milestone | What shipped |
 |---|---|
 | v0.1 | Core collectors, forecast API, altitude winds endpoint, cache persistence, accuracy GUI stations |
+| v0.2 | Dashboard, Data Inspector, wind grid, GitHub Actions Docker pipeline, CH1/CH2 cache merge |
 
 ---
 
@@ -43,6 +44,9 @@
 - `cin: -999.9` ICON fill value should map to `null` (clip CIN_ML where < -900)
 - Altitude winds (U/V/W) all null — eccodes level-type mismatch or STAC search issue, not yet investigated
 - Accuracy GUI `fetchActuals` / `fetchForecasts` call Lenticularis directly from browser → CORS-blocked
+
+### Fixed in v0.2
+- **CH1/CH2 cache overwrite bug** — CH2 was overwriting CH1's cache entry for every station, discarding the 0–30h hourly data. Now stored in separate dicts (`_ch1_station_cache` / `_ch2_station_cache`) and merged at read time: CH1 hourly head (h0–h30) + CH2 3h-step tail (h33–h120).
 
 ---
 

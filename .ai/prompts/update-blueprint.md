@@ -1,6 +1,7 @@
 # Prompt: Update AI Blueprint from Central Repo
 
 > **Purpose**: Pull the latest framework files from the central AI Blueprint repo and apply them to this project's `.ai/` folder.
+> **Category**: `dev-web` — FastAPI + Vanilla JS web services
 > **Source**: https://github.com/Think4dvantage/ai-blueprint
 > **Use when**: You want to sync improvements made to the central blueprint into this project.
 
@@ -21,7 +22,7 @@ Not all `.ai/` files are updated. The blueprint owns the **framework**. The proj
 
 Before fetching individual files, attempt to fetch the blueprint manifest from the central repo:
 
-**URL**: `https://raw.githubusercontent.com/Think4dvantage/ai-blueprint/main/.ai/manifest.json`
+**URL**: `https://raw.githubusercontent.com/Think4dvantage/ai-blueprint/main/dev-web/.ai/manifest.json`
 
 - If the fetch is successful, use the file list in the manifest to determine which files to fetch in Step 1.
 - If the fetch fails (404), proceed to Step 1 using the hardcoded list below as a fallback.
@@ -32,36 +33,37 @@ Before fetching individual files, attempt to fetch the blueprint manifest from t
 
 Fetch each framework file from the central repo using its raw GitHub URL.
 
-Base URL: `https://raw.githubusercontent.com/Think4dvantage/ai-blueprint/main/`
+Base URL: `https://raw.githubusercontent.com/Think4dvantage/ai-blueprint/main/dev-web/.ai/`
 
 **Hardcoded Fallback List** (only use if Step 0 fails):
 
 | Remote path | Local path |
 |---|---|
-| `.ai/instructions/00-ai-usage.md` | `.ai/instructions/00-ai-usage.md` |
-| `.ai/instructions/02-backend-conventions.md` | `.ai/instructions/02-backend-conventions.md` |
-| `.ai/instructions/03-frontend-conventions.md` | `.ai/instructions/03-frontend-conventions.md` |
-| `.ai/instructions/04-constraints.md` | `.ai/instructions/04-constraints.md` |
-| `.ai/instructions/05-user-profile.md` | `.ai/instructions/05-user-profile.md` |
-| `.ai/instructions/06-testing-conventions.md` | `.ai/instructions/06-testing-conventions.md` |
-| `.ai/instructions/07-api-conventions.md` | `.ai/instructions/07-api-conventions.md` |
-| `.ai/prompts/add-api-router.md` | `.ai/prompts/add-api-router.md` |
-| `.ai/prompts/add-i18n-keys.md` | `.ai/prompts/add-i18n-keys.md` |
-| `.ai/prompts/add-sqlite-table.md` | `.ai/prompts/add-sqlite-table.md` |
-| `.ai/prompts/analyze.md` | `.ai/prompts/analyze.md` |
-| `.ai/prompts/architect.md` | `.ai/prompts/architect.md` |
-| `.ai/prompts/checklist.md` | `.ai/prompts/checklist.md` |
-| `.ai/prompts/clarify.md" | `.ai/prompts/clarify.md" |
-| `.ai/prompts/fix-bug.md` | `.ai/prompts/fix-bug.md` |
-| `.ai/prompts/implement.md` | `.ai/prompts/implement.md` |
-| `.ai/prompts/new-feature.md` | `.ai/prompts/new-feature.md` |
-| `.ai/prompts/plan.md` | `.ai/prompts/plan.md` |
-| `.ai/prompts/specify.md` | `.ai/prompts/specify.md` |
-| `.ai/prompts/sync.md` | `.ai/prompts/sync.md` |
-| `.ai/prompts/tasks.md` | `.ai/prompts/tasks.md` |
-| `.ai/prompts/taskstoissues.md` | `.ai/prompts/taskstoissues.md` |
-| `.ai/prompts/update-blueprint.md` | `.ai/prompts/update-blueprint.md` |
-| `.ai/prompts/update-readme.md` | `.ai/prompts/update-readme.md` |
+| `instructions/00-ai-usage.md` | `instructions/00-ai-usage.md` |
+| `instructions/02-backend-conventions.md` | `instructions/02-backend-conventions.md` |
+| `instructions/03-frontend-conventions.md` | `instructions/03-frontend-conventions.md` |
+| `instructions/04-constraints.md` | `instructions/04-constraints.md` |
+| `instructions/05-user-profile.md` | `instructions/05-user-profile.md` |
+| `instructions/06-testing-conventions.md` | `instructions/06-testing-conventions.md` |
+| `instructions/07-api-conventions.md` | `instructions/07-api-conventions.md` |
+| `instructions/08-operability.md` | `instructions/08-operability.md` |
+| `prompts/add-api-router.md` | `prompts/add-api-router.md` |
+| `prompts/add-i18n-keys.md` | `prompts/add-i18n-keys.md` |
+| `prompts/add-sqlite-table.md` | `prompts/add-sqlite-table.md` |
+| `prompts/analyze.md` | `prompts/analyze.md` |
+| `prompts/architect.md` | `prompts/architect.md` |
+| `prompts/checklist.md` | `prompts/checklist.md` |
+| `prompts/clarify.md` | `prompts/clarify.md` |
+| `prompts/fix-bug.md` | `prompts/fix-bug.md` |
+| `prompts/implement.md` | `prompts/implement.md` |
+| `prompts/new-feature.md` | `prompts/new-feature.md` |
+| `prompts/plan.md` | `prompts/plan.md` |
+| `prompts/specify.md` | `prompts/specify.md` |
+| `prompts/sync.md` | `prompts/sync.md` |
+| `prompts/tasks.md` | `prompts/tasks.md` |
+| `prompts/taskstoissues.md` | `prompts/taskstoissues.md` |
+| `prompts/update-blueprint.md` | `prompts/update-blueprint.md` |
+| `prompts/update-readme.md` | `prompts/update-readme.md` |
 
 Fetch all files. If a fetch fails (404, network error), note the failure and continue with the rest — do not abort the whole update.
 
@@ -109,20 +111,16 @@ Do not auto-fix conflicts. Report them and ask if the user wants to address them
 
 ---
 
-## Step 6 — Remind About Pointer Files
-
-Pointer files (`CLAUDE.md`, `.cursorrules`, `.github/copilot-instructions.md`) are not updated by this prompt — they are one-liners and don't change. No action needed.
-
-## Step 7 — Identify Contributions to the Blueprint
+## Step 6 — Identify Contributions to the Blueprint
 
 The goal of the blueprint is to evolve. If this project has improved a framework file or added a useful new prompt, suggest contributing it back to the central repo.
 
-### 7.1 Scan for Local Additions
+### 6.1 Scan for Local Additions
 Identify any files in `.ai/prompts/` or `.ai/instructions/` (excluding project data files) that:
 - Exist locally but were NOT in the blueprint manifest/fetch list.
 - Have been significantly improved or customized in a way that would benefit other projects.
 
-### 7.2 Propose the Contribution
+### 6.2 Propose the Contribution
 If additions or improvements are found, present them to the user:
 
 > **Contribution Suggestion**: I noticed you've added/improved the following framework files:
@@ -131,20 +129,21 @@ If additions or improvements are found, present them to the user:
 >
 > Would you like to contribute these back to the central AI Blueprint?
 
-### 7.3 Provide the "Transport" Prompt
+### 6.3 Provide the "Transport" Prompt
 If the user wants to contribute, generate a block they can copy:
 
-"To update the central blueprint, open the `ai-blueprint` repository and run this prompt:
-```markdown
-# Contribution from Project: [THIS PROJECT NAME]
+Generate a block the user can copy into the `ai-blueprint` repo session:
 
-I have improvements to the following blueprint files. Please read their content from the other project and update the blueprint to match:
+```markdown
+# Contribution from Project: [THIS PROJECT NAME] (dev-web category)
+
+Please update the following blueprint files in dev-web/.ai/:
 
 1. `prompts/new-cool-tool.md`: [Brief description of what it does]
 2. `instructions/02-backend-conventions.md`: [Brief description of the improvement]
 
-[Paste the full content of the files here or instructions on where to find them]
-```"
+[Paste the full content of the files here]
+```
 
 ---
 

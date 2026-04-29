@@ -1,3 +1,25 @@
+# Resume Notes — 2026-04-23
+
+## What Was Done This Session
+
+### CH1/CH2 cache merge fix
+
+**Root cause** — `set_station_forecast()` was a plain dict overwrite (`_station_cache[key] = data`). CH2 ran last in `_warm_cache()` and overwrote CH1's entry for every station, discarding 0–30h of hourly data.
+
+**Fix** — `database/cache.py` now uses two separate dicts:
+- `_ch1_station_cache` / `_ch2_station_cache`
+- `_ch1_altitude_winds_cache` / `_ch2_altitude_winds_cache`
+
+`set_station_forecast()` routes by `data.model` (`"icon-ch1"` → CH1 dict, else → CH2 dict). `get_station_forecast()` merges on the fly: CH1 entries (h0–h30, 1h steps) + CH2 entries where `valid_time > last CH1 valid_time` (first CH2 step served is h33). Each collector refreshes only its own slice — a CH1 re-run doesn't touch the CH2 tail, and vice versa.
+
+`save_cache()` / `load_cache()` use new JSON keys `ch1_station`, `ch2_station`, `ch1_altitude_winds`, `ch2_altitude_winds`. Old `cache.json` files (with key `station`) will start fresh on next container boot.
+
+`station_cache_detail()` now returns `{count, ch1: {...}, ch2: {...}, combined_forecast_hours, init_time, valid_until}` instead of a flat dict. `altitude_winds_cache_detail()` returns `{count, ch1_count, ch2_count}`.
+
+Dashboard JS (`static/dashboard.js`) updated to display CH1 and CH2 cache state separately.
+
+---
+
 # Resume Notes — 2026-04-18
 
 ## Status
