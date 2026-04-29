@@ -47,8 +47,8 @@ GRID_STEP_DEG = 1.0 / 111.0  # ~1 km
 
 # ---------- Collection constants ----------
 COLLECTION = "ch.meteoschweiz.ogd-forecasting-icon-ch1"
-N_MEMBERS = 11
-HORIZONS = list(range(31))  # 0 h … 30 h inclusive
+N_MEMBERS = 11  # informational only — actual count is read from each GRIB run
+HORIZONS = list(range(34))  # 0 h … 33 h inclusive
 
 SURFACE_VARS: list[str] = [
     "U_10M", "V_10M", "VMAX_10M",
@@ -674,7 +674,21 @@ class IconCh1EpsCollector(BaseCollector):
             n_surf_total = sum(len(ts) for ts in surf_tasks.values())
             logger.info("CH1 surface fetch: %d/%d tasks returned data", n_surf_ok, n_surf_total)
 
-            nan_surf = np.full((N_MEMBERS, n_stations), np.nan)
+            # Member count is a property of the model run — read it from the data.
+            # Never compare against a hardcoded constant: MeteoSwiss may change the
+            # ensemble size and the code should silently adapt.
+            _n_members: int = next(
+                (
+                    t.result().shape[0]
+                    for ts in surf_tasks.values()
+                    for t in ts
+                    if _task_ok(t) and t.result().ndim == 2
+                ),
+                1,
+            )
+            logger.info("CH1 ensemble members in GRIB: %d", _n_members)
+
+            _nan_surf = np.full((_n_members, n_stations), np.nan)
 
             def surf_array(var: str) -> np.ndarray:
                 steps = []
@@ -683,15 +697,15 @@ class IconCh1EpsCollector(BaseCollector):
                     if isinstance(r, np.ndarray) and r.ndim == 3:
                         r = r[:, -1, :]
                     steps.append(
-                        r if isinstance(r, np.ndarray) and r.shape == nan_surf.shape
-                        else nan_surf
+                        r if isinstance(r, np.ndarray) and r.shape == _nan_surf.shape
+                        else _nan_surf
                     )
                 return np.stack(steps, axis=0)
 
             def pres_array(var: str) -> np.ndarray:
                 if not pres_tasks.get(var):
-                    return np.full((len(HORIZONS), N_MEMBERS, len(level_hpa), n_stations), np.nan)
-                nan_pres = np.full((N_MEMBERS, len(level_hpa), n_stations), np.nan)
+                    return np.full((len(HORIZONS), _n_members, len(level_hpa), n_stations), np.nan)
+                nan_pres = np.full((_n_members, len(level_hpa), n_stations), np.nan)
                 steps = []
                 for task in pres_tasks[var]:
                     r = task.result() if not task.cancelled() else None

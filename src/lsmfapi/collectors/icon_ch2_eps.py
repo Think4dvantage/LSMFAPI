@@ -66,23 +66,29 @@ _GRID_N_LON: int = 0
 
 # ---------- Collection constants ----------
 COLLECTION = "ch.meteoschweiz.ogd-forecasting-icon-ch2"
-N_MEMBERS = 21
-# CH2-EPS: 30 h … 120 h in 3-hour steps
-HORIZONS = list(range(30, 121, 3))
+N_MEMBERS = 21  # informational only — actual count is read from each GRIB run
+# CH2-EPS: h34 … h120 at 1-hour steps (CH1 owns h0–h33)
+HORIZONS = list(range(34, 121))
+# Shadow-fetch this step for accumulated vars to enable correct deaccumulation
+ACCUM_PRIOR_H = 33
 
 
 def _latest_ref_dt_ch2() -> datetime:
-    """Return most recent CH2-EPS run time that is likely already published (3 h guard)."""
+    """Return most recent CH2-EPS run time that is likely already published.
+
+    Snaps to the most recent 6-hour run boundary (00Z/06Z/12Z/18Z) with a 3-hour
+    guard — matching the CH2 cron trigger at 03Z/09Z/15Z/21Z.
+    """
     now = datetime.now(timezone.utc)
-    hour = 0 if now.hour < 12 else 12
+    hour = (now.hour // 6) * 6
     candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     if (now - candidate).total_seconds() < 3 * 3600:
-        candidate -= timedelta(hours=12)
+        candidate -= timedelta(hours=6)
     return candidate
 
 
 class IconCh2EpsCollector(BaseCollector):
-    """ICON-CH2-EPS collector — 30–120 h, 2 runs/day (00Z/12Z), 21 members."""
+    """ICON-CH2-EPS collector — h34–h120 at 1h steps, 4 runs/day (00Z/06Z/12Z/18Z), 21 members."""
 
     async def _ensure_grid(self, tmpdir: Path) -> None:
         global _GRID_TREE, _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON
@@ -245,6 +251,18 @@ class IconCh2EpsCollector(BaseCollector):
                         if done % 20 == 0 or done == total:
                             logger.info("CH2 %d/%d (%s h=%d)", done, total, var, h)
 
+                # Shadow-fetch h33 for each accumulated variable — used only as the
+                # deaccumulation baseline so that the h34 delta is correct.
+                prior_tasks: dict[str, asyncio.Task] = {
+                    var: asyncio.ensure_future(
+                        self._fetch_step(
+                            semaphore, client, ref_dt, var, ACCUM_PRIOR_H,
+                            station_flat_indices, tmpdir,
+                        )
+                    )
+                    for var in ACCUM_VARS
+                }
+
                 surf_tasks: dict[str, list[asyncio.Task]] = {v: [] for v in SURFACE_VARS}
                 for var in SURFACE_VARS:
                     for h in HORIZONS:
@@ -256,7 +274,8 @@ class IconCh2EpsCollector(BaseCollector):
                         for h in HORIZONS:
                             pres_tasks[var].append(asyncio.ensure_future(fetch(var, h)))
 
-                all_tasks = [t for ts in surf_tasks.values() for t in ts]
+                all_tasks = list(prior_tasks.values())
+                all_tasks += [t for ts in surf_tasks.values() for t in ts]
                 all_tasks += [t for ts in pres_tasks.values() for t in ts]
                 await asyncio.gather(*all_tasks, return_exceptions=True)
 
@@ -272,7 +291,19 @@ class IconCh2EpsCollector(BaseCollector):
             n_surf_total = sum(len(ts) for ts in surf_tasks.values())
             logger.info("CH2 surface fetch: %d/%d tasks returned data", n_surf_ok, n_surf_total)
 
-            nan_surf = np.full((N_MEMBERS, n_stations), np.nan)
+            # Member count is a property of the model run — read it from the data.
+            _n_members: int = next(
+                (
+                    t.result().shape[0]
+                    for ts in surf_tasks.values()
+                    for t in ts
+                    if _task_ok(t) and t.result().ndim == 2
+                ),
+                1,
+            )
+            logger.info("CH2 ensemble members in GRIB: %d", _n_members)
+
+            _nan_surf = np.full((_n_members, n_stations), np.nan)
 
             def surf_array(var: str) -> np.ndarray:
                 steps = []
@@ -281,15 +312,15 @@ class IconCh2EpsCollector(BaseCollector):
                     if isinstance(r, np.ndarray) and r.ndim == 3:
                         r = r[:, -1, :]
                     steps.append(
-                        r if isinstance(r, np.ndarray) and r.shape == nan_surf.shape
-                        else nan_surf
+                        r if isinstance(r, np.ndarray) and r.shape == _nan_surf.shape
+                        else _nan_surf
                     )
                 return np.stack(steps, axis=0)
 
             def pres_array(var: str) -> np.ndarray:
                 if not pres_tasks[var]:
-                    return np.full((len(HORIZONS), N_MEMBERS, len(level_hpa), n_stations), np.nan)
-                nan_pres = np.full((N_MEMBERS, len(level_hpa), n_stations), np.nan)
+                    return np.full((len(HORIZONS), _n_members, len(level_hpa), n_stations), np.nan)
+                nan_pres = np.full((_n_members, len(level_hpa), n_stations), np.nan)
                 steps = []
                 for task in pres_tasks[var]:
                     r = task.result() if not task.cancelled() else None
@@ -312,16 +343,33 @@ class IconCh2EpsCollector(BaseCollector):
             cin_ml = surf_array("CIN_ML")
             u_pl = pres_array("U");  v_pl = pres_array("V");  w_pl = pres_array("W")
 
-            def deaccum(arr: np.ndarray) -> np.ndarray:
+            nan_prior = np.zeros((_n_members, n_stations))
+
+            def _get_prior(var: str) -> np.ndarray:
+                t = prior_tasks.get(var)
+                if t is None or t.cancelled():
+                    return nan_prior
+                try:
+                    r = t.result()
+                except Exception:
+                    return nan_prior
+                if isinstance(r, np.ndarray) and r.ndim == 3:
+                    r = r[:, -1, :]
+                if isinstance(r, np.ndarray) and r.shape == nan_prior.shape:
+                    return r
+                return nan_prior
+
+            def deaccum(arr: np.ndarray, var: str) -> np.ndarray:
+                prior = _get_prior(var)
                 out = np.empty_like(arr)
                 for s in range(n_stations):
-                    out[:, :, s] = _deaccumulate(arr[:, :, s])
+                    out[:, :, s] = np.diff(arr[:, :, s], axis=0, prepend=prior[:, s][np.newaxis, :])
                 return out
 
-            prec_rate = np.clip(deaccum(tot_prec), 0.0, None)
-            dursun_min = np.clip(deaccum(dursun) / 60.0, 0.0, None)
-            solar_direct = np.clip(deaccum(aswdir_s) / 3600.0, 0.0, None)
-            solar_diffuse = np.clip(deaccum(aswdifd_s) / 3600.0, 0.0, None)
+            prec_rate = np.clip(deaccum(tot_prec, "TOT_PREC"), 0.0, None)
+            dursun_min = np.clip(deaccum(dursun, "DURSUN") / 60.0, 0.0, None)
+            solar_direct = np.clip(deaccum(aswdir_s, "ASWDIR_S") / 3600.0, 0.0, None)
+            solar_diffuse = np.clip(deaccum(aswdifd_s, "ASWDIFD_S") / 3600.0, 0.0, None)
             rh = _compute_rh_from_td(t_2m, td_2m)
             t_c = t_2m - 273.15
             pmsl_hpa = pmsl / 100.0
