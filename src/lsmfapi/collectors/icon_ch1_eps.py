@@ -2,7 +2,6 @@ import asyncio
 import logging
 import math
 import re
-import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,6 +11,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from lsmfapi.collectors.base import BaseCollector
+from lsmfapi.collectors.grib_cache import grib_run_dir
 from lsmfapi.config import get_config
 from lsmfapi.database.cache import set_grid_wind_cache, set_station_altitude_winds, set_station_forecast
 from lsmfapi.database import collection_state as _cs
@@ -542,11 +542,14 @@ class IconCh1EpsCollector(BaseCollector):
                 return None
 
             dest = tmpdir / f"{variable}_{horizon_h:03d}.grib2"
-            try:
-                await self.download(url, str(dest))
-            except Exception as exc:
-                logger.error("Download failed %s h=%d: %s", variable, horizon_h, exc)
-                return None
+            if dest.exists() and dest.stat().st_size > 1024:
+                logger.debug("CH1 GRIB cache hit: %s h=%d", variable, horizon_h)
+            else:
+                try:
+                    await self.download(url, str(dest))
+                except Exception as exc:
+                    logger.error("Download failed %s h=%d: %s", variable, horizon_h, exc)
+                    return None
 
         try:
             arr, _level_coords = _read_grib2_eccodes(dest)
@@ -559,9 +562,10 @@ class IconCh1EpsCollector(BaseCollector):
             )
             logger.debug("CH1 data %s h=%d shape=%s", variable, horizon_h, result.shape)
             return result
-        finally:
-            if not keep:
-                dest.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.error("eccodes read failed %s h=%d: %s — removing cached file", variable, horizon_h, exc)
+            dest.unlink(missing_ok=True)
+            return None
 
     def collect_grid(
         self,
@@ -586,8 +590,7 @@ class IconCh1EpsCollector(BaseCollector):
         ref_dt = _latest_ref_dt()
         logger.info("IconCh1EpsCollector.collect() ref_dt=%s", ref_dt.isoformat())
 
-        with tempfile.TemporaryDirectory(prefix="lsmfapi_ch1_") as tmpdir_str:
-            tmpdir = Path(tmpdir_str)
+        with grib_run_dir("ch1", ref_dt) as tmpdir:
 
             await self._ensure_grid(tmpdir)
             stations = await self._fetch_stations()
@@ -633,12 +636,9 @@ class IconCh1EpsCollector(BaseCollector):
                 _cs.mark_running("ch1", ref_dt, n_surf + n_pres)
 
                 async def fetch(var: str, h: int) -> np.ndarray | None:
-                    # Keep U/V and T_2M/TD_2M on disk for collect_grid()
-                    keep = var in ("U", "V", "T_2M", "TD_2M")
                     try:
                         return await self._fetch_step(
                             semaphore, client, ref_dt, var, h, station_flat_indices, tmpdir,
-                            keep=keep,
                         )
                     finally:
                         progress[0] += 1
