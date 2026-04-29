@@ -632,20 +632,24 @@ class IconCh1EpsCollector(BaseCollector):
 
                 n_surf = len(SURFACE_VARS) * len(HORIZONS)
                 n_pres = len(CH1_PRESSURE_VARS) * len(HORIZONS) if has_pressure_levels else 0
-                progress = [0, n_surf + n_pres]
+                progress = [0, 0, n_surf + n_pres]  # [done, ok, total]
                 _cs.mark_running("ch1", ref_dt, n_surf + n_pres)
 
                 async def fetch(var: str, h: int) -> np.ndarray | None:
+                    result: np.ndarray | None = None
                     try:
-                        return await self._fetch_step(
+                        result = await self._fetch_step(
                             semaphore, client, ref_dt, var, h, station_flat_indices, tmpdir,
                         )
+                        return result
                     finally:
                         progress[0] += 1
-                        done, total = progress
-                        _cs.mark_progress("ch1", done)
+                        if result is not None:
+                            progress[1] += 1
+                        done, ok, total = progress
+                        _cs.mark_progress("ch1", done, ok)
                         if done % 20 == 0 or done == total:
-                            logger.info("CH1 %d/%d (%s h=%d)", done, total, var, h)
+                            logger.info("CH1 %d/%d ok=%d (%s h=%d)", done, total, ok, var, h)
 
                 surf_tasks: dict[str, list[asyncio.Task]] = {v: [] for v in SURFACE_VARS}
                 for var in SURFACE_VARS:

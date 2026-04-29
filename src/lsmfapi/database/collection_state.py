@@ -12,6 +12,7 @@ _state: dict[str, dict[str, Any]] = {
         "duration_s": None,
         "ref_dt": None,
         "files_done": 0,
+        "files_ok": 0,
         "files_total": 0,
         "last_error": None,
     },
@@ -22,6 +23,7 @@ _state: dict[str, dict[str, Any]] = {
         "duration_s": None,
         "ref_dt": None,
         "files_done": 0,
+        "files_ok": 0,
         "files_total": 0,
         "last_error": None,
     },
@@ -44,10 +46,12 @@ def mark_running(model: str, ref_dt: datetime, files_total: int) -> None:
     s["ref_dt"] = ref_dt.isoformat()
     s["files_total"] = files_total
     s["files_done"] = 0
+    s["files_ok"] = 0
 
 
-def mark_progress(model: str, done: int) -> None:
+def mark_progress(model: str, done: int, ok: int = 0) -> None:
     _state[model]["files_done"] = done
+    _state[model]["files_ok"] = ok
 
 
 def mark_done(model: str, duration_s: float) -> None:

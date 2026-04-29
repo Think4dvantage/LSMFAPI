@@ -55,6 +55,46 @@ function modelRows(fields) {
     .join("");
 }
 
+function renderCoverageBar(data) {
+  const sc = data.station_cache;
+  const now = Date.now();
+  const STALE_MS = 12 * 3600 * 1000;
+
+  const ch1 = sc.ch1;
+  const ch2 = sc.ch2;
+  const ch1Ok = !!(ch1?.init_time && (now - new Date(ch1.init_time).getTime()) <= STALE_MS);
+  const ch2Ok = !!(ch2?.init_time && (now - new Date(ch2.init_time).getTime()) <= STALE_MS);
+
+  const ch1InitLabel = ch1?.init_time ? fmtAgo(ch1.init_time) : "no data";
+  const ch2InitLabel = ch2?.init_time ? fmtAgo(ch2.init_time) : "no data";
+
+  const bar = document.getElementById("coverage-bar");
+  bar.innerHTML = "";
+
+  for (let h = 1; h <= 33; h++) {
+    const seg = document.createElement("div");
+    seg.className = "cov-seg" + (ch1Ok ? " ok" : "");
+    seg.title = `h+${h} · CH1-EPS · init ${ch1InitLabel}`;
+    bar.appendChild(seg);
+  }
+
+  const divider = document.createElement("div");
+  divider.className = "cov-divider";
+  divider.title = "CH1 / CH2 boundary";
+  divider.textContent = "│";
+  bar.appendChild(divider);
+
+  for (let h = 34; h <= 120; h++) {
+    const seg = document.createElement("div");
+    seg.className = "cov-seg" + (ch2Ok ? " ok" : "");
+    seg.title = `h+${h} · CH2-EPS · init ${ch2InitLabel}`;
+    bar.appendChild(seg);
+  }
+
+  setText("cov-ch1-lbl", `CH1-EPS h1–33 · ${ch1Ok ? "✓ " : "✗ "}${ch1InitLabel}`);
+  setText("cov-ch2-lbl", `CH2-EPS h34–120 · ${ch2Ok ? "✓ " : "✗ "}${ch2InitLabel}`);
+}
+
 // ── Render functions ──────────────────────────────────────────────────────────
 
 function renderOverview(data) {
@@ -122,8 +162,11 @@ function renderCollection(model, state) {
     progressEl.style.display = "";
     const pct = Math.round((state.files_done / state.files_total) * 100);
     document.getElementById(barId).style.width = `${pct}%`;
-    document.getElementById(progLabelId).textContent =
-      `${state.files_done} / ${state.files_total} files (${pct}%)`;
+    const ok = state.files_ok ?? 0;
+    const failed = state.files_done - ok;
+    const failedStr = failed > 0 ? ` · <span style="color:#e57373;">⚠ ${failed} failed</span>` : "";
+    document.getElementById(progLabelId).innerHTML =
+      `${state.files_done} / ${state.files_total} (${pct}%)${failedStr}`;
   } else {
     progressEl.style.display = "none";
   }
@@ -134,10 +177,18 @@ function renderCollection(model, state) {
     ? "✓ up to date"
     : (state.ref_dt ? "stale" : "—");
 
+  const filesOk = state.files_ok ?? 0;
+  const filesTotal = state.files_total ?? 0;
+  const filesFailed = (state.files_done ?? 0) - filesOk;
+  const filesLabel = filesTotal > 0
+    ? `${filesOk} / ${filesTotal} ok` + (filesFailed > 0 ? ` · ⚠ ${filesFailed} failed` : " · ✓ all ok")
+    : "—";
+
   document.getElementById(rowsId).innerHTML = modelRows([
     ["Expected dataset", expectedDt],
     ["Cached dataset", cachedDt],
     ["Currency", currentLabel],
+    ["Files downloaded", filesLabel],
     ["Last run started", state.started_at ? fmtAgo(state.started_at) : "—"],
     ["Last run finished", state.finished_at ? fmtAgo(state.finished_at) : "—"],
     ["Duration", fmtDuration(state.duration_s)],
@@ -159,8 +210,8 @@ function renderCacheDetail(data) {
   }
   document.getElementById("cache-station-rows").innerHTML = modelRows([
     ["Stations", sc.count],
-    ["CH1 (0–30 h, 1 h steps)", sc.ch1 ? `${sc.ch1.forecast_hours} h, init ${fmtDt(sc.ch1.init_time)}` : "—"],
-    ["CH2 (30–120 h, 3 h steps)", sc.ch2 ? `${sc.ch2.forecast_hours} steps, init ${fmtDt(sc.ch2.init_time)}` : "—"],
+    ["CH1 (h0–33, 1 h steps)", sc.ch1 ? `${sc.ch1.forecast_hours} h, init ${fmtDt(sc.ch1.init_time)}` : "—"],
+    ["CH2 (h34–120, 1 h steps)", sc.ch2 ? `${sc.ch2.forecast_hours} steps, init ${fmtDt(sc.ch2.init_time)}` : "—"],
     ["Combined forecast entries", sc.combined_forecast_hours],
     ["Valid until", fmtDt(sc.valid_until)],
     ["Altitude wind profiles", `${data.altitude_winds_cache.ch1_count} CH1 + ${data.altitude_winds_cache.ch2_count} CH2`],
@@ -234,6 +285,7 @@ async function refresh() {
     console.log(`[App:dashboard] data received in ${elapsed} ms`, data);
 
     renderOverview(data);
+    renderCoverageBar(data);
     renderCollection("ch1", data.collection.ch1);
     renderCollection("ch2", data.collection.ch2);
     renderCacheDetail(data);
