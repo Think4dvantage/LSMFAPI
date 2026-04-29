@@ -1,3 +1,54 @@
+# Resume Notes — 2026-04-29
+
+## What Was Done This Session
+
+### Collector horizons & schedule redesign
+
+CH1 and CH2 now together cover the full 120-hour window hourly:
+
+| Model | HORIZONS | Steps | Cron (UTC) | Logic |
+|---|---|---|---|---|
+| ICON-CH1-EPS | h0–h33 (inclusive) | hourly | 02/08/14/20Z | 2 h after each 00/06/12/18Z release |
+| ICON-CH2-EPS | h34–h120 (inclusive) | hourly | 03/09/15/21Z | 3 h after each 00/06/12/18Z release |
+
+CH2 does **not** download h0–h33 (those belong to CH1). CH1 always wins the write for its slice.
+
+### Root cause of all-NULL station values — fixed
+
+`N_MEMBERS` was hardcoded (11 for CH1, 21 for CH2) but MeteoSwiss currently delivers **10 members** for CH1. The shape check `r.shape == (11, n_stations)` failed at every step, so every value fell through to the all-NaN fallback.
+
+**Fix**: `N_MEMBERS` is now labelled `# informational only`. After all fetch tasks complete, the actual count is read from the first valid 2-D result:
+
+```python
+_n_members = next(
+    (t.result().shape[0] for ts in surf_tasks.values() for t in ts
+     if _task_ok(t) and t.result().ndim == 2),
+    1,
+)
+```
+
+`_nan_surf`, `nan_prior`, `nan_pres` are all built from `_n_members`; `_get_prior()` compares against the runtime shape. Log line `"CH1 ensemble members in GRIB: %d"` confirms the detected count at every run.
+
+### GRIB file persistence cache — `collectors/grib_cache.py`
+
+Replaces `tempfile.TemporaryDirectory`. Files persist in `/tmp/lsmfapi_grib/{model}/{YYYYMMDDTHHMMZ}/` across container restarts.
+
+- `grib_run_dir(model, ref_dt)` — context manager: purges stale run dirs on entry, **does not delete** on exit
+- `_fetch_step()` cache-hit check: `if dest.exists() and dest.stat().st_size > 1024: skip download`
+- Corrupt file guard: eccodes failure → `dest.unlink(missing_ok=True)` → re-downloaded next start
+- Old runs (different `ref_dt`) are deleted automatically on next startup
+
+### Dashboard download ok/failed counts
+
+`collection_state.py` now tracks `files_ok` (downloaded + parsed successfully) alongside `files_done` (attempted). `failed = files_done − files_ok`.
+
+- **During a run**: progress bar label shows `"X / Y (Z%) · ⚠ N failed"` in red when N > 0
+- **After completion**: model detail card row shows `"N / T ok · ⚠ F failed"` or `"· ✓ all ok"`
+
+Collector `fetch()` closures: `result: np.ndarray | None = None` declared before `try` so `finally` can check success and increment `progress[1]` (ok counter).
+
+---
+
 # Resume Notes — 2026-04-23
 
 ## What Was Done This Session
@@ -98,22 +149,26 @@ Also fixed field names: `s.station_id`, `s.latitude`, `s.longitude` (was `s.id`,
 ## Key Files
 
 ```
-src/lsmfapi/collectors/icon_ch1_eps.py   — CH1 collector (all helpers live here)
-src/lsmfapi/collectors/icon_ch2_eps.py   — CH2 collector (imports helpers from CH1)
+src/lsmfapi/collectors/icon_ch1_eps.py   — CH1 collector (h0–h33 hourly); all shared helpers live here
+src/lsmfapi/collectors/icon_ch2_eps.py   — CH2 collector (h34–h120 hourly); imports helpers from CH1
+src/lsmfapi/collectors/grib_cache.py     — grib_run_dir() context manager; persistent GRIB dirs in /tmp
 src/lsmfapi/models/forecast.py           — all Pydantic models incl. AltitudeWindsResponse
 src/lsmfapi/database/cache.py            — in-memory cache + save/load persistence
+src/lsmfapi/database/collection_state.py — runtime collection state (status, files_done, files_ok, errors)
 src/lsmfapi/scheduler.py                 — APScheduler + _warm_cache background task
 src/lsmfapi/api/routers/forecast.py      — /api/forecast/station + /api/forecast/altitude-winds
 src/lsmfapi/api/routers/accuracy.py      — accuracy GUI + /api/stations proxy
 src/lsmfapi/api/main.py                  — lifespan: load_cache → scheduler → save_cache on shutdown
+static/dashboard.js                      — dashboard frontend; renderCollection() shows ok/failed counts
 static/index.js                          — accuracy GUI frontend
 docker-compose.yml                       — base compose (data volume mount)
 docker-compose.dev.yml                   — dev overlay (Traefik labels, live src mount, data volume)
 scripts/LSMF-dev.ps1                     — SSH deploy script (deploy/sync/restart/logs/exec)
+scripts/diag_interlaken.py               — dry-run diagnostic: prints raw ensemble values for one station
 config.yml                               — meteoswiss URLs, lenticularis base_url, scheduler intervals
 ```
 
 ## Context Files to Read
 
-- `.ai/context/architecture.md` — STAC API, variables, eccodes, altitude mapping, API contracts
+- `.ai/context/architecture.md` — STAC API, variables, eccodes, altitude mapping, GRIB cache, API contracts
 - `.ai/context/features.md` — shipped vs backlog

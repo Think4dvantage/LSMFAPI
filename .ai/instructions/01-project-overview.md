@@ -39,8 +39,8 @@ src/lsmfapi/
 │       └── accuracy.py      # GET /api/accuracy/* (GUI data)
 ├── collectors/
 │   ├── base.py              # Abstract base + download helpers
-│   ├── icon_ch1_eps.py      # ICON-CH1-EPS (30h) ingestor
-│   └── icon_ch2_eps.py      # ICON-CH2-EPS (120h) ingestor
+│   ├── icon_ch1_eps.py      # ICON-CH1-EPS (0–33h) ingestor
+│   └── icon_ch2_eps.py      # ICON-CH2-EPS (34–120h) ingestor
 ├── database/
 │   ├── models.py            # SQLAlchemy ORM (Recipe, RecipeRule)
 │   ├── db.py                # init_db(), get_db(), _run_column_migrations()
@@ -91,12 +91,12 @@ Accuracy GUI (browser)
 
 | Source | Format | Variables | Horizon | Runs/day | Members |
 |---|---|---|---|---|---|
-| ICON-CH1-EPS | GRIB2 | See variables below | 0–30h | 4 (00Z/06Z/12Z/18Z) | 11 |
-| ICON-CH2-EPS | GRIB2 | See variables below | 30–120h | 2 (00Z/12Z) | 21 |
+| ICON-CH1-EPS | GRIB2 | See variables below | 0–33h (1h steps) | 4 (00Z/06Z/12Z/18Z) | 11 |
+| ICON-CH2-EPS | GRIB2 | See variables below | 34–120h (1h steps) | 4 (00Z/06Z/12Z/18Z) | 21 |
 
 **Forecast Variables**: wind speed (10m), wind gusts (10m), wind direction (10m), temperature (2m), relative humidity, QFF pressure, precipitation, pressure-level winds at 9 altitude bands (500m/800m/1000m/1500m/2000m/2500m/3000m/4000m/5000m ASL).
 
-**Blending rule**: hours 0–30 from CH1-EPS (hourly, higher resolution); hours 33–120 from CH2-EPS (3h steps). CH1 and CH2 are cached in separate dicts and merged at read time — each collector refreshes only its own slice.
+**Blending rule**: h0–h33 from CH1-EPS (hourly, 1km resolution); h34–h120 from CH2-EPS (hourly, 2.1km resolution). CH1 always wins for any overlapping valid_time. CH2 shadow-fetches h33 at collection time purely as the deaccumulation baseline for accumulated variables. Both collectors run 4×/day at 00Z/06Z/12Z/18Z — CH1 triggered at +2h, CH2 at +3h to allow for MeteoSwiss publication lag.
 
 ---
 

@@ -8,12 +8,12 @@ All computed forecast data is held in Python in-process dicts. There is no time-
 
 ```python
 # database/cache.py
-_ch1_station_cache: dict[str, StationForecastResponse] = {}  # CH1: h0–h30, 1 h steps
-_ch2_station_cache: dict[str, StationForecastResponse] = {}  # CH2: h30–h120, 3 h steps
+_ch1_station_cache: dict[str, StationForecastResponse] = {}  # CH1: h0–h33, 1 h steps
+_ch2_station_cache: dict[str, StationForecastResponse] = {}  # CH2: h34–h120, 1 h steps
 # key: station_id  (e.g. "meteoswiss-BER")
 ```
 
-CH1 and CH2 are stored independently so each collector can update its own slice without touching the other. `get_station_forecast()` merges them on the fly: all CH1 entries first, then CH2 entries with `valid_time` strictly after the last CH1 `valid_time` (i.e. h30 excluded from CH2, first appended step is h33).
+CH1 and CH2 are stored independently so each collector can update its own slice without touching the other. `get_station_forecast()` merges them on the fly: all CH1 entries first (h0–h33, 1h steps), then CH2 entries with `valid_time` strictly after the last CH1 `valid_time` (first appended step is h34).
 
 **Priority rule**: `set_station_forecast()` routes by `data.model`:
 - `"icon-ch1"` → written to `_ch1_station_cache` (always overwrites own slice)
@@ -21,10 +21,11 @@ CH1 and CH2 are stored independently so each collector can update its own slice 
 
 This means a CH1 re-run only refreshes the CH1 dict; the CH2 tail remains intact. A CH2 re-run only refreshes the CH2 dict; the CH1 hourly head remains intact.
 
-- Populated after every collection run (CH1-EPS every 3 h, CH2-EPS every 6 h)
-- Also populated once at container startup (immediate collection run triggered in lifespan)
-- API calls are pure dict lookups + in-memory merge, no on-the-fly computation
-- Station list is fetched from the Lenticularis API on startup and refreshed before each collection run
+- CH1 runs at 02/08/14/20Z UTC (2 h after each 00/06/12/18Z release). Covers h0–h33.
+- CH2 runs at 03/09/15/21Z UTC (3 h after each 00/06/12/18Z release). Covers h34–h120 only — h0–h33 GRIB files are NOT downloaded by CH2.
+- Both are triggered 4×/day. Warm-up (CH1 then CH2 sequentially) runs once at container startup.
+- API calls are pure dict lookups + in-memory merge, no on-the-fly computation.
+- Station list is fetched from the Lenticularis API on startup and refreshed before each collection run.
 
 ### Wind grid cache
 
@@ -51,7 +52,7 @@ Populated alongside `_station_cache` after each collection run.
 ```python
 # database/cache.py
 def get_station_forecast(station_key: str) -> StationForecastResponse | None: ...
-    # Returns merged CH1+CH2 view: CH1 hourly head, CH2 3h-step tail
+    # Returns merged CH1+CH2 view: CH1 hourly head (h0–h33), CH2 hourly tail (h34–h120)
 def set_station_forecast(station_key: str, data: StationForecastResponse) -> None: ...
     # Routes to _ch1_station_cache or _ch2_station_cache based on data.model
 def get_station_altitude_winds(station_key: str) -> AltitudeWindsResponse | None: ...
@@ -76,6 +77,16 @@ CH1 and CH2 are saved and loaded independently; a new deploy never loses the CH2
 
 Volume mount: `./data:/app/data` (in both compose files). The `./data` directory is excluded
 from the rsync deploy so the remote cache is never overwritten by a deploy.
+
+### GRIB file persistence cache
+
+GRIBs are stored in `/tmp/lsmfapi_grib/{model}/{YYYYMMDDTHHMMZ}/` (not a throwaway `tempfile`).
+
+- Implemented in `collectors/grib_cache.py` — `grib_run_dir(model, ref_dt)` context manager
+- On context entry: purges directories from previous ref_dt (old run cleanup), creates/reuses current dir
+- On context exit: **does NOT delete** — files survive container restarts if ref_dt hasn't changed
+- Cache-hit check in `_fetch_step()`: `dest.exists() and dest.stat().st_size > 1024` → skip HTTP
+- Corrupt-file guard: if eccodes fails to parse, `dest.unlink(missing_ok=True)` → re-downloaded next start
 
 ---
 
@@ -194,10 +205,12 @@ Download once at container startup and cache in memory. Build the KD-tree from t
 
 ### Ensemble member counts
 
-| Model | Members |
-|---|---|
-| ICON-CH1-EPS | 11 |
-| ICON-CH2-EPS | 21 |
+| Model | Nominal members | Actual delivery |
+|---|---|---|
+| ICON-CH1-EPS | 11 | 10 (as of 2026-04) |
+| ICON-CH2-EPS | 21 | TBD — read dynamically |
+
+**Do NOT hardcode member counts.** Both collectors read the actual count from the first valid GRIB result and build all NaN templates from that runtime value. The `N_MEMBERS` constant in each file is labelled `# informational only` and is never used as a gate.
 
 ### How to get all ensemble members
 
