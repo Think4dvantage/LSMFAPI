@@ -15,6 +15,7 @@ from lsmfapi.collectors.grib_cache import grib_run_dir
 from lsmfapi.config import get_config
 from lsmfapi.database.cache import set_grid_wind_cache, set_station_altitude_winds, set_station_forecast
 from lsmfapi.database import collection_state as _cs
+from lsmfapi.database import telemetry as _telemetry
 from lsmfapi.models.forecast import (
     AltitudeWindLevel,
     AltitudeWindsProfile,
@@ -55,7 +56,7 @@ SURFACE_VARS: list[str] = [
     "T_2M", "TD_2M", "PMSL",
     "TOT_PREC", "DURSUN", "ASWDIR_S", "ASWDIFD_S",
     "CLCT", "CLCL", "CLCM", "CLCH",
-    "HBAS_CON", "HPBL", "HZEROCL", "CAPE_ML", "CIN_ML",
+    "HZEROCL", "CAPE_ML", "CIN_ML",
 ]
 ACCUM_VARS: frozenset[str] = frozenset({"TOT_PREC", "DURSUN", "ASWDIR_S", "ASWDIFD_S"})
 
@@ -293,7 +294,7 @@ def _read_grib2_eccodes(
                     eccodes.codes_release(msg)
     except Exception as exc:
         logger.error("eccodes read failed for %s: %s", path.name, exc)
-        return None, None
+        raise
 
     if not messages:
         logger.warning("No GRIB2 messages in %s", path.name)
@@ -536,9 +537,11 @@ class IconCh1EpsCollector(BaseCollector):
                 )
             except Exception as exc:
                 logger.error("STAC search error %s h=%d: %s", variable, horizon_h, exc)
+                _telemetry.record_download_error("ch1", variable, horizon_h, f"STAC search: {exc}")
                 return None
 
             if url is None:
+                logger.warning("CH1 STAC: no asset found for %s h=%d — variable may not be published", variable, horizon_h)
                 return None
 
             dest = tmpdir / f"{variable}_{horizon_h:03d}.grib2"
@@ -549,6 +552,7 @@ class IconCh1EpsCollector(BaseCollector):
                     await self.download(url, str(dest))
                 except Exception as exc:
                     logger.error("Download failed %s h=%d: %s", variable, horizon_h, exc)
+                    _telemetry.record_download_error("ch1", variable, horizon_h, f"Download: {exc}")
                     return None
 
         try:
@@ -565,6 +569,7 @@ class IconCh1EpsCollector(BaseCollector):
         except Exception as exc:
             logger.error("eccodes read failed %s h=%d: %s — removing cached file", variable, horizon_h, exc)
             dest.unlink(missing_ok=True)
+            _telemetry.record_download_error("ch1", variable, horizon_h, f"eccodes: {exc}")
             return None
 
     def collect_grid(
@@ -727,7 +732,6 @@ class IconCh1EpsCollector(BaseCollector):
             aswdir_s = surf_array("ASWDIR_S");   aswdifd_s = surf_array("ASWDIFD_S")
             clct = surf_array("CLCT");  clcl = surf_array("CLCL")
             clcm = surf_array("CLCM");  clch = surf_array("CLCH")
-            hbas_con = surf_array("HBAS_CON");   hpbl = surf_array("HPBL")
             hzerocl = surf_array("HZEROCL");     cape_ml = surf_array("CAPE_ML")
             cin_ml = surf_array("CIN_ML")
             u_pl = pres_array("U");  v_pl = pres_array("V");  w_pl = pres_array("W")

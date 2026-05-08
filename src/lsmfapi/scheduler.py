@@ -3,11 +3,10 @@ import logging
 import time
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 from lsmfapi.collectors.icon_ch1_eps import IconCh1EpsCollector
 from lsmfapi.collectors.icon_ch2_eps import IconCh2EpsCollector
-from lsmfapi.config import get_config
 from lsmfapi.database import collection_state as cs
 from lsmfapi.database.cache import save_cache
 
@@ -58,21 +57,16 @@ class CollectorScheduler:
         self._scheduler = AsyncIOScheduler()
 
     async def startup(self) -> None:
-        cfg = get_config()
+        # CH1 (0–33 h, 1 km): trigger at 02/08/14/20 UTC — 2 h after each 00/06/12/18Z run
         self._scheduler.add_job(
             _run_ch1eps,
-            IntervalTrigger(
-                hours=cfg.scheduler.ch1eps_interval_hours,
-                jitter=cfg.scheduler.ch1eps_jitter_seconds,
-            ),
+            CronTrigger(hour="2,8,14,20", minute=0, timezone="UTC"),
             id="collect_ch1eps",
         )
+        # CH2 (34–120 h, 2.1 km): trigger at 03/09/15/21 UTC — 3 h after each 00/06/12/18Z run
         self._scheduler.add_job(
             _run_ch2eps,
-            IntervalTrigger(
-                hours=cfg.scheduler.ch2eps_interval_hours,
-                jitter=cfg.scheduler.ch2eps_jitter_seconds,
-            ),
+            CronTrigger(hour="3,9,15,21", minute=0, timezone="UTC"),
             id="collect_ch2eps",
         )
         self._scheduler.start()

@@ -150,6 +150,50 @@
 
     .dot-warn { background: var(--warning); }
     .dot-err  { background: var(--danger); }
+
+    /* ── Forecast coverage bar ── */
+    .coverage-bar {
+      display: flex;
+      align-items: stretch;
+      gap: 2px;
+      height: 22px;
+    }
+
+    .cov-seg {
+      flex: 1;
+      border-radius: 2px;
+      background: var(--danger);
+      cursor: default;
+      transition: opacity 0.15s;
+    }
+    .cov-seg:hover { opacity: 0.65; }
+    .cov-seg.ok    { background: var(--success); }
+
+    .cov-divider {
+      width: 8px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--border);
+      font-size: 10px;
+    }
+
+    .coverage-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 6px;
+    }
+
+    .coverage-labels .cov-center {
+      display: flex;
+      gap: 0;
+      flex: 1;
+      justify-content: center;
+      gap: 16px;
+    }
   </style>
 </head>
 <body>
@@ -167,6 +211,20 @@
       <span id="refresh-dot" class="dot"></span>
       <span id="refresh-status">Loading…</span>
       <span style="margin-left:auto;">Auto-refresh every 10 s</span>
+    </div>
+
+    <!-- Forecast Coverage Bar -->
+    <div class="section-title">Forecast Coverage (120 h)</div>
+    <div class="card" style="padding: 14px 16px; margin-bottom: 16px;">
+      <div class="coverage-bar" id="coverage-bar"></div>
+      <div class="coverage-labels">
+        <span>+1 h</span>
+        <div class="cov-center">
+          <span id="cov-ch1-lbl">CH1-EPS · h1–33</span>
+          <span id="cov-ch2-lbl">CH2-EPS · h34–120</span>
+        </div>
+        <span>+120 h</span>
+      </div>
     </div>
 
     <!-- Overview stats -->

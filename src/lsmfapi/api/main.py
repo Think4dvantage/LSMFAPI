@@ -69,7 +69,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/", include_in_schema=False)
 async def root() -> RedirectResponse:
-    return RedirectResponse(url="/accuracy")
+    return RedirectResponse(url="/dashboard")
 
 
 @app.get("/health", include_in_schema=False)

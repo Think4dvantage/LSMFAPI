@@ -1,3 +1,56 @@
+# Resume Notes — 2026-04-30
+
+## Integration test — E2E collection smoke test
+
+Added `tests/test_e2e_collection.py` (`@pytest.mark.integration`). Runs `IconCh1EpsCollector.collect()` with one hardcoded station (Interlaken) and HORIZONS patched to `[0, 6]`. Mocks `_fetch_stations` so CI doesn't need Lenticularis. Asserts cache is populated with non-null, physically plausible wind_speed/temperature/pressure_qff. Takes ~2–4 min.
+
+`.github/workflows/integration-test.yml` runs on every push to `main` and every PR. Local: `pytest -m integration -v`.
+
+`pyproject.toml` — added `[tool.poetry.group.dev.dependencies]` with pytest + pytest-asyncio, plus `[tool.pytest.ini_options]` (asyncio_mode=auto, integration marker).
+
+---
+
+## Bug Fix: CH1/CH2 collections both failing since last deploy
+
+**Root cause**: `HBAS_CON` and `HPBL` were removed from `SURFACE_VARS` in the previous session, but the `surf_array("HBAS_CON")` and `surf_array("HPBL")` calls in both `collect()` methods were not removed. `surf_tasks` is built from `SURFACE_VARS`, so `surf_tasks["HBAS_CON"]` raised `KeyError: 'HBAS_CON'` and aborted every collection run.
+
+**Fix**: Removed the two dead `surf_array()` lines from `icon_ch1_eps.py:735` and `icon_ch2_eps.py:350`. Both variables were already absent from `StationForecastHour` output — they had no consumers.
+
+Error in logs: `Collection failed for ch1: 'HBAS_CON'` / `Collection failed for ch2: 'HBAS_CON'`
+
+---
+
+## What Was Done This Session
+
+### Dashboard errors panel now includes download failures
+
+`telemetry.py` `_recent_errors` deque was only populated from HTTP middleware. Collector failures (STAC search errors, download errors, eccodes parse errors) were tracked as counter deltas (`files_done − files_ok`) but never shown in the errors panel.
+
+**Fix**: Added `record_download_error(model, variable, horizon_h, error_msg)` to `telemetry.py`. Uses the same dict shape as HTTP errors (`ts`, `method`, `path`, `status`, `detail`) with `method=CH1/CH2`, `path="VARNAME h+N"`, `status="DL-ERR"`. The existing `renderErrors()` JS table renders them without any frontend changes.
+
+Both CH1 and CH2 collectors now call `_telemetry.record_download_error()` at all three failure points (STAC search exception, download exception, eccodes parse exception).
+
+### Corrupt GRIB files now self-delete on eccodes failure
+
+`_read_grib2_eccodes()` was catching exceptions internally and returning `(None, None)`. The caller's `except` block (which calls `dest.unlink(missing_ok=True)`) never fired — truncated GRIB files persisted in `/tmp/lsmfapi_grib/` across container restarts causing the same eccodes error every run until `ref_dt` changed.
+
+**Fix**: Changed `return None, None` → `raise` in `_read_grib2_eccodes` exception handler. All 6 call sites were already in `try/except` or `try/finally` with `dest.unlink()` guards — safe to re-raise.
+
+### Silent `url is None` now logs a WARNING
+
+`_search_item_url` returns `None` when STAC returns no features. The caller `_fetch_step` was silently returning `None` with no log and no telemetry. Added `logger.warning()` to both CH1 and CH2 `_fetch_step` when `url is None`.
+
+### HBAS_CON and HPBL removed from SURFACE_VARS
+
+STAC catalog query confirmed: neither `hbas_con` nor `hpbl` is published in `ch.meteoschweiz.ogd-forecasting-icon-ch1` or `ch.meteoschweiz.ogd-forecasting-icon-ch2`. Every run was wasting 68 STAC calls (2 vars × 34 horizons) that always returned `features: []`.
+
+Removed both from `SURFACE_VARS` in `icon_ch1_eps.py`. CH2 imports `SURFACE_VARS` from CH1 so the fix covers both collectors.
+
+**Full CH1/CH2-EPS catalog** (confirmed via STAC search with `forecast:perturbed: true`):
+`alb_rad`, `alhfl_s`, `ashfl_s`, `asob_s`, `aswdifd_s`, `aswdifu_s`, `aswdir_s`, `athb_s`, `cape_ml`, `cape_mu`, `ceiling`, `cin_ml`, `cin_mu`, `clc`, `clch`, `clcl`, `clcm`, `clct`, `dbz_850`, `dbz_cmax`, `dursun`, `dursun_m`, `grau_gsp`, `h_snow`, `hzerocl`, `lcl_ml`, `lfc_ml`, `p`, `pmsl`, `ps`, `qc`, `qv`, `rain_gsp`, `sdi_2`, `sli`, `snow_gsp`, `snowlmt`, `t`, `t_2m`, `t_g`, `t_snow`, `t_so`, `td_2m`, `tke`, `tmax_2m`, `tmin_2m`, `tot_pr`, `tot_prec`, `twater`, `u`, `u_10m`, `v`, `v_10m`, `vmax_10m`, `w`, `w_snow`, `z0`
+
+---
+
 # Resume Notes — 2026-04-29
 
 ## What Was Done This Session

@@ -20,7 +20,8 @@
       "Bash(gh api *)",
       "Bash(ssh xpsex *)",
       "Bash(git -C C:/git/LSMFAPI log --oneline -5)",
-      "Bash(git -C C:/git/LSMFAPI status)"
+      "Bash(git -C C:/git/LSMFAPI status)",
+      "Bash(grep -o '\"message\":{\"role\":\"user\",\"content\":\"[^\"]*\\\\[Lenti:index\\\\][^\"]*' \"C:\\\\Users\\\\raphael.eymann\\\\.claude\\\\projects\\\\C--git-LSMFAPI\\\\0450bd7b-ac80-4f67-9cb7-1025d32feb64.jsonl\")"
     ]
   }
 }

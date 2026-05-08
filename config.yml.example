@@ -5,9 +5,3 @@ meteoswiss:
 
 lenticularis:
   base_url: "https://lenticularis.lg4.ch"
-
-scheduler:
-  ch1eps_interval_hours: 3
-  ch1eps_jitter_seconds: 600
-  ch2eps_interval_hours: 6
-  ch2eps_jitter_seconds: 600

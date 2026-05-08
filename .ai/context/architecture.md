@@ -169,8 +169,8 @@ Legend — Accum: field is accumulated from model start; must be de-accumulated 
 | Low cloud cover | `CLCL` | no | % |
 | Medium cloud cover | `CLCM` | no | % |
 | High cloud cover | `CLCH` | no | % |
-| Convective cloud base height | `HBAS_CON` | no | m AGL; 0 when no convective cloud |
-| Boundary layer height | `HPBL` | no | m AGL — thermal ceiling proxy |
+| Convective cloud base height | `HBAS_CON` | no | **NOT published in EPS catalog** — removed from SURFACE_VARS |
+| Boundary layer height | `HPBL` | no | **NOT published in EPS catalog** — removed from SURFACE_VARS |
 | Freezing level | `HZEROCL` | no | m ASL height of 0 °C isotherm |
 | Mixed-layer CAPE | `CAPE_ML` | no | J/kg — convective energy (0 = stable) |
 | Mixed-layer CIN | `CIN_ML` | no | J/kg — convective inhibition (negative) |

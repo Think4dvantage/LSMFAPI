@@ -26,8 +26,8 @@
 - Temperature (2m), relative humidity (from TD_2M via Magnus formula), QFF pressure
 - Precipitation (mm/h, de-accumulated)
 - Radiation: solar direct (W/m²), solar diffuse (W/m²), sunshine minutes/h (de-accumulated)
-- Cloud cover: total, low, mid, high (%), convective cloud base (m AGL)
-- Thermics: boundary layer height (m AGL), freezing level (m ASL), CAPE (J/kg), CIN (J/kg)
+- Cloud cover: total, low, mid, high (%)
+- Thermics: freezing level (m ASL), CAPE (J/kg), CIN (J/kg)
 - Altitude winds (separate endpoint): speed, direction, vertical wind at 9 bands (500–5000m ASL)
 
 ### API ✓
@@ -46,7 +46,10 @@
 - **CH2 3h steps → 1h steps** — CH2 now covers h34–h120 with hourly resolution (was 3h).
 - **CH2 schedule 2×/day → 4×/day** — both models now run 4×/day; CH2 at 03/09/15/21Z (was 00/12Z only).
 - **GRIB persistence cache** — GRIB files survive container restarts in `/tmp/lsmfapi_grib/`; re-downloads only happen when the ref_dt changes.
-- **Dashboard download failure visibility** — progress bar and completion row now show ok/failed file counts.
+- **Dashboard errors panel shows download failures** — `telemetry.record_download_error()` added; collector STAC/download/eccodes failures now appear in the last-20-errors panel with `status=DL-ERR`.
+- **Corrupt GRIB files self-delete** — `_read_grib2_eccodes` now re-raises on eccodes failure instead of returning `(None, None)`; `dest.unlink()` guard in caller now fires correctly.
+- **Silent `url is None` now warns** — `_fetch_step` logs a WARNING when STAC returns no features for a variable/horizon combination.
+- **HBAS_CON and HPBL removed from SURFACE_VARS** — neither variable is published in the CH1-EPS or CH2-EPS STAC catalog; removing them eliminates 68 wasted STAC calls per run (2 vars × 34 horizons).
 
 ### Known issues (not yet fixed)
 - `sunshine_minutes` wrong on CH2 first step (h=34 is first horizon; full 34h accumulation used as delta)
