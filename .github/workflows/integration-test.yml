@@ -14,9 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install eccodes system library
-        run: sudo apt-get install -y libeccodes-dev
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -24,6 +21,17 @@ jobs:
 
       - name: Install Poetry
         run: pip install poetry
+
+      - name: Install libeccodes 2.38 via conda-forge
+        # apt on ubuntu-latest (24.04) ships eccodes 2.34.1, which is incompatible
+        # with eccodes-cosmo-resources-python 2.38 definition files.
+        # Install the matching C library from conda-forge and prepend it to
+        # LD_LIBRARY_PATH so Python findlibs resolves 2.38 before the system lib.
+        run: |
+          wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniforge.sh
+          bash miniforge.sh -b -p "$HOME/miniforge"
+          "$HOME/miniforge/bin/conda" install -y -c conda-forge eccodes=2.38.3
+          echo "LD_LIBRARY_PATH=$HOME/miniforge/lib" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: poetry install --with dev
