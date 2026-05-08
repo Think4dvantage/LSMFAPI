@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 _ch1_collector = IconCh1EpsCollector()
 _ch2_collector = IconCh2EpsCollector()
 
+_ch1_lock = asyncio.Lock()
+_ch2_lock = asyncio.Lock()
+
 
 async def _warm_cache() -> None:
     """Run CH1 then CH2 once at startup to fill the cache. Sequential to avoid overloading downloads."""
@@ -23,33 +26,41 @@ async def _warm_cache() -> None:
 
 
 async def _run_ch1eps() -> None:
-    cs.mark_started("ch1")
-    t0 = time.monotonic()
-    try:
-        await _ch1_collector.collect()
-        cs.mark_done("ch1", time.monotonic() - t0)
-        save_cache()
-    except NotImplementedError as e:
-        cs.mark_failed("ch1", str(e))
-        logger.warning("CH1-EPS collector not yet implemented: %s", e)
-    except Exception as exc:
-        cs.mark_failed("ch1", str(exc))
-        logger.exception("CH1-EPS collection failed")
+    if _ch1_lock.locked():
+        logger.info("CH1 collection already in progress — skipping trigger")
+        return
+    async with _ch1_lock:
+        cs.mark_started("ch1")
+        t0 = time.monotonic()
+        try:
+            await _ch1_collector.collect()
+            cs.mark_done("ch1", time.monotonic() - t0)
+            save_cache()
+        except NotImplementedError as e:
+            cs.mark_failed("ch1", str(e))
+            logger.warning("CH1-EPS collector not yet implemented: %s", e)
+        except Exception as exc:
+            cs.mark_failed("ch1", str(exc))
+            logger.exception("CH1-EPS collection failed")
 
 
 async def _run_ch2eps() -> None:
-    cs.mark_started("ch2")
-    t0 = time.monotonic()
-    try:
-        await _ch2_collector.collect()
-        cs.mark_done("ch2", time.monotonic() - t0)
-        save_cache()
-    except NotImplementedError as e:
-        cs.mark_failed("ch2", str(e))
-        logger.warning("CH2-EPS collector not yet implemented: %s", e)
-    except Exception as exc:
-        cs.mark_failed("ch2", str(exc))
-        logger.exception("CH2-EPS collection failed")
+    if _ch2_lock.locked():
+        logger.info("CH2 collection already in progress — skipping trigger")
+        return
+    async with _ch2_lock:
+        cs.mark_started("ch2")
+        t0 = time.monotonic()
+        try:
+            await _ch2_collector.collect()
+            cs.mark_done("ch2", time.monotonic() - t0)
+            save_cache()
+        except NotImplementedError as e:
+            cs.mark_failed("ch2", str(e))
+            logger.warning("CH2-EPS collector not yet implemented: %s", e)
+        except Exception as exc:
+            cs.mark_failed("ch2", str(exc))
+            logger.exception("CH2-EPS collection failed")
 
 
 class CollectorScheduler:
