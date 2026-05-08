@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "lsmfapi"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lenticularis SwissMeteo Forecast API"
 authors = ["Raphael Eymann <r+claude@eymanns.ch>"]
 packages = [{include = "lsmfapi", from = "src"}]
@@ -22,9 +22,19 @@ numpy = "^1.26"
 pyyaml = "^6.0"
 aiofiles = "^24.0"
 
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+pytest-asyncio = "^0.24"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: end-to-end tests that hit real external APIs (deselect with -m 'not integration')",
+]
 
 [tool.ruff]
 line-length = 100
