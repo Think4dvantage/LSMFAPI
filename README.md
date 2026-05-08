@@ -214,14 +214,12 @@ GRIB files are stored in `/tmp/lsmfapi_grib/{model}/{YYYYMMDDTHHMMZ}/` (not a th
 
 ### Docker
 
-Three compose files; never combine prd and dev overlays on the same host:
+```bash
+# Dev (live reload via LSMF-dev.ps1 deploy, or directly):
+docker compose --project-name lsmfapi-dev -f docker-compose.yml -f docker-compose.dev.yml up --build -d
+```
 
-| Environment | Command |
-|---|---|
-| Production | `docker compose -f docker-compose.yml -f docker-compose.prd.yml up -d` |
-| Dev (live reload) | `docker compose --project-name lsmfapi-dev -f docker-compose.yml -f docker-compose.dev.yml up --build -d` |
-
-`docker-compose.yml` is the base (no Traefik labels). Each overlay adds only its own router — this prevents Traefik from discovering the DEV container as a backend for the PRD hostname, which would cause it to load-balance between the two instances.
+`docker-compose.yml` is the base with no Traefik labels. The dev overlay (`docker-compose.dev.yml`) adds only the DEV router labels (`lsmfapi-dev.lg4.ch`). The PRD deployment has its own compose file outside this repo with its own Traefik labels — **never use `docker-compose.yml` from this repo for PRD**, otherwise Traefik will not add the correct routing labels and the container will be invisible to the router.
 
 ### Healthcheck
 
