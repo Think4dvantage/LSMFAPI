@@ -1,0 +1,11 @@
+services:
+  lsmfapi:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.lsmfapi.rule=Host(`lsmfapi.lg4.ch`)"
+      - "traefik.http.routers.lsmfapi.entrypoints=websecure"
+      - "traefik.http.routers.lsmfapi.tls=true"
+      - "traefik.http.routers.lsmfapi.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.lsmfapi.service=lsmfapi"
+      - "traefik.http.services.lsmfapi.loadbalancer.server.port=8000"
+      - "traefik.docker.network=proxy"
