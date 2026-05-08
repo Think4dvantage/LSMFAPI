@@ -2,7 +2,7 @@
 
 ## What This Is
 
-LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the OpenMeteo dependency in the Lenticularis paragliding weather decision-support app. It downloads raw ensemble model output (ICON-CH1-EPS, ICON-CH2-EPS) directly from the MeteoSwiss open data portal, computes statistically robust forecast summaries (median + absolute min/max across all members and runs), and exposes them to Lenticularis via a clean REST API. It also provides an internal English-only GUI for forecast accuracy analysis and recipe-based bias correction.
+LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the OpenMeteo dependency in the Lenticularis paragliding weather decision-support app. It downloads raw ensemble model output (ICON-CH1-EPS, ICON-CH2-EPS) directly from the MeteoSwiss open data portal, computes statistically robust forecast summaries (median + absolute min/max across all members and runs), and exposes them to Lenticularis via a REST API. It also provides an internal English-only GUI for forecast accuracy analysis.
 
 ---
 
@@ -14,14 +14,14 @@ LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the
 | Web framework | FastAPI |
 | Data validation | Pydantic v2 |
 | Dependency management | Poetry (`pyproject.toml`) |
-| Forecast cache | Python in-process dict (populated on startup + after each collection run) |
-| Relational DB | SQLite via SQLAlchemy (no Alembic — see backend conventions) |
-| Scheduler | APScheduler |
+| Forecast cache | Python in-process dicts (CH1 + CH2 stored separately, merged at read time) |
+| Relational DB | SQLite via SQLAlchemy (no Alembic — raw ALTER TABLE in `_run_column_migrations()`) |
+| Scheduler | APScheduler (cron triggers) |
 | HTTP client | httpx (async) |
 | Config | YAML (`config.yml`) validated by Pydantic |
-| GRIB2 parsing | `cfgrib` + `xarray` + `eccodes` |
+| GRIB2 parsing | `cfgrib` + `xarray` + `eccodes` + `eccodes-cosmo-resources-python` |
 | Spatial math | `scipy` (KD-tree nearest-point lookup) |
-| Frontend | Vanilla JS (English only — no i18n system) |
+| Frontend | Vanilla JS (English only — no i18n, no build step, no npm) |
 | Container | Docker + docker-compose |
 
 ---
@@ -30,34 +30,34 @@ LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the
 
 ```
 src/lsmfapi/
+├── _eccodes.py              # ecCodes + COSMO definitions setup (called on startup)
+├── config.py                # Pydantic-validated YAML config loader (singleton)
+├── scheduler.py             # APScheduler cron jobs; per-model asyncio locks prevent overlapping runs
 ├── api/
 │   ├── main.py              # FastAPI app factory + lifespan
-│   └── routers/             # One file per domain
-│       ├── forecast.py      # GET /api/forecast/station
-│       ├── wind_grid.py     # GET /api/forecast/wind-grid
-│       ├── recipes.py       # CRUD /api/recipes (v0.2)
-│       └── accuracy.py      # GET /api/accuracy/* (GUI data)
+│   └── routers/
+│       ├── forecast.py      # GET /api/forecast/station + /altitude-winds + /wind-grid
+│       ├── accuracy.py      # GET /accuracy (GUI) + /api/meta + /api/stations proxy
+│       └── dashboard.py     # GET /dashboard + /api/dashboard (collection state + telemetry)
 ├── collectors/
-│   ├── base.py              # Abstract base + download helpers
-│   ├── icon_ch1_eps.py      # ICON-CH1-EPS (0–33h) ingestor
-│   └── icon_ch2_eps.py      # ICON-CH2-EPS (34–120h) ingestor
+│   ├── base.py              # Abstract base + async download helper
+│   ├── grib_cache.py        # grib_run_dir() context manager; persistent GRIB dirs in /tmp
+│   ├── icon_ch1_eps.py      # ICON-CH1-EPS ingestor (h0–h33, 1h steps, ~10 members)
+│   └── icon_ch2_eps.py      # ICON-CH2-EPS ingestor (h34–h120, 1h steps, ~21 members)
 ├── database/
-│   ├── models.py            # SQLAlchemy ORM (Recipe, RecipeRule)
+│   ├── cache.py             # In-memory forecast cache (get/set station + altitude winds + grid)
+│   ├── collection_state.py  # Runtime collection state (status, files_done, files_ok)
+│   ├── telemetry.py         # HTTP + download error log (last 20 errors → dashboard)
 │   ├── db.py                # init_db(), get_db(), _run_column_migrations()
-│   └── cache.py             # In-memory forecast cache (get/set station + grid)
-├── models/                  # Pydantic request/response schemas
-│   ├── forecast.py
-│   └── recipe.py
-├── services/
-│   ├── ensemble.py          # Median + absolute min/max across members × runs
-│   ├── interpolation.py     # KD-tree nearest-point + bilinear (v0.2)
-│   └── recipe_engine.py     # Apply recipe corrections (v0.2)
-├── config.py                # Pydantic-validated YAML config loader (singleton)
-└── scheduler.py             # APScheduler jobs
+│   └── models.py            # SQLAlchemy ORM (Recipe, RecipeRule — v0.4)
+├── models/
+│   └── forecast.py          # Pydantic schemas: ForecastResponse, AltitudeWindsResponse
+└── services/
+    └── ensemble.py          # Median + circular median + absolute min/max
 static/
 ├── shared.css               # Dark theme
+├── dashboard.html + dashboard.js   # Operational dashboard
 ├── index.html + index.js    # Accuracy analysis GUI
-├── recipes.html + recipes.js # Recipe editor (v0.2)
 ```
 
 ---
@@ -66,50 +66,62 @@ static/
 
 ```
 Container startup
-  → Fetch station list from Lenticularis API
-  → Trigger immediate collection run to warm the cache
+  → setup_definitions(): register COSMO GRIB2 shortName defs with ecCodes
+  → init_db()
+  → load_cache(): restore CH1 + CH2 dicts from /app/data/cache.json (API usable immediately)
+  → CollectorScheduler.startup(): register cron jobs + asyncio.create_task(_warm_cache())
 
-MeteoSwiss open data portal (GRIB2 files)
-  → Collectors download + parse (cfgrib + xarray)
-  → Ensemble engine: median, min, max across all members × runs
-  → Compute ForecastResponse for every known station
-  → Store in in-memory dict (keyed by lat_lon_elev)
+_warm_cache() runs CH1 then CH2 sequentially:
+  → _ensure_grid(): download horizontal_constants GRIB2, build KD-tree (1.1M points for CH1)
+  → _fetch_stations(): GET {lenticularis.base_url}/api/stations
+  → concurrent GRIB downloads via asyncio.Semaphore (DOWNLOAD_CONCURRENCY)
+  → GRIB file persistence: /tmp/lsmfapi_grib/{model}/{ref_dt}/ — skips re-downloads
+  → eccodes parsing → numpy arrays → ensemble stats (median, min, max)
+  → set_station_forecast() / set_station_altitude_winds() per station
+  → save_cache(): atomic write to /app/data/cache.json
 
-API routes
-  → Dict lookup (no computation)
-  → Apply active Recipe corrections (if any)
-  → Return JSON to Lenticularis
-
-Accuracy GUI (browser)
-  → Fetches actuals + historical forecasts from Lenticularis directly
-  → Renders bias charts + RMSE summary table
+API routes → pure dict lookup, no on-the-fly computation → JSON to Lenticularis
 ```
 
 ---
 
 ## Data Sources
 
-| Source | Format | Variables | Horizon | Runs/day | Members |
-|---|---|---|---|---|---|
-| ICON-CH1-EPS | GRIB2 | See variables below | 0–33h (1h steps) | 4 (00Z/06Z/12Z/18Z) | 11 |
-| ICON-CH2-EPS | GRIB2 | See variables below | 34–120h (1h steps) | 4 (00Z/06Z/12Z/18Z) | 21 |
+| Model | Resolution | Horizon | Trigger (UTC) | Members |
+|---|---|---|---|---|
+| ICON-CH1-EPS | 1.1 km | h0–h33 (1h steps) | 02/08/14/20Z | ~10 (read dynamically from GRIB) |
+| ICON-CH2-EPS | 2.2 km | h34–h120 (1h steps) | 03/09/15/21Z | ~21 (read dynamically) |
 
-**Forecast Variables**: wind speed (10m), wind gusts (10m), wind direction (10m), temperature (2m), relative humidity, QFF pressure, precipitation, pressure-level winds at 9 altitude bands (500m/800m/1000m/1500m/2000m/2500m/3000m/4000m/5000m ASL).
+Triggers are 2h (CH1) and 3h (CH2) after each 00/06/12/18Z MeteoSwiss release.
 
-**Blending rule**: h0–h33 from CH1-EPS (hourly, 1km resolution); h34–h120 from CH2-EPS (hourly, 2.1km resolution). CH1 always wins for any overlapping valid_time. CH2 shadow-fetches h33 at collection time purely as the deaccumulation baseline for accumulated variables. Both collectors run 4×/day at 00Z/06Z/12Z/18Z — CH1 triggered at +2h, CH2 at +3h to allow for MeteoSwiss publication lag.
+**Ensemble member count**: NEVER hardcoded. Read from the first valid GRIB result at runtime. `N_MEMBERS` in collector files is `# informational only`.
 
----
+**Variables per station per hour**: wind speed/direction/gusts (10m), temperature (2m), relative humidity (from TD_2M via Magnus formula — NOT QV), QFF pressure (PMSL), precipitation (de-accumulated), solar direct/diffuse (de-accumulated), sunshine minutes (de-accumulated), cloud cover total/low/mid/high, freezing level, CAPE_ML, CIN_ML.
 
-## Lenticularis Integration
+**Not in EPS catalog**: `HBAS_CON` (cloud base) and `HPBL` (boundary layer height) — do NOT add these back to SURFACE_VARS.
 
-LSMFAPI is a drop-in replacement for Lenticularis's two OpenMeteo collectors:
-- `forecast_openmeteo.py` → calls `GET /api/forecast/station`
-- `forecast_grid.py` → calls `GET /api/forecast/wind-grid`
-
-Response shapes match Lenticularis's `ForecastPoint` and `GridForecastPoint` models. Lenticularis owns historical data archiving; LSMFAPI stores only the active 7-day forecast window.
+**Altitude winds** (separate endpoint): U/V/W at 9 pressure levels → mapped to 500/800/1000/1500/2000/2500/3000/4000/5000 m ASL.
 
 ---
 
-## Local LLM (v0.3 — not yet implemented)
+## API Endpoints
 
-A local LLM instance (e.g. Ollama) is available in the infrastructure. Planned use: feed accuracy data and bias statistics to the LLM to get natural-language analysis and Recipe correction suggestions. Lenticularis's `api/routers/ai.py` has an existing pattern for this.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/forecast/station` | Hourly blended forecast, params: `station_id`, `hours` |
+| GET | `/api/forecast/altitude-winds` | Pressure-level winds at 9 altitude bands, params: `station_id`, `hours` |
+| GET | `/api/forecast/wind-grid` | 171-point wind grid (stub — not yet populated by collectors) |
+| GET | `/api/stations` | Proxy to Lenticularis — avoids browser CORS |
+| GET | `/dashboard` | Operational dashboard (collection state, cache, error log) |
+| GET | `/accuracy` | Accuracy analysis GUI |
+| GET | `/health` | Cache stats + service health |
+
+---
+
+## Deployment
+
+- PRD: container `lsmfapi` on XPS, compose file lives **outside this repo** on the server. Uses image `ghcr.io/think4dvantage/lsmfapi:<tag>`.
+- DEV: deployed via `scripts/LSMF-dev.ps1` using `docker compose --project-name lsmfapi-dev -f docker-compose.yml -f docker-compose.dev.yml`.
+- `docker-compose.yml` in this repo is the **DEV base only** — no Traefik labels. PRD labels live in the server-side compose file.
+- Cache volume: `./data:/app/data` — never overwritten by rsync deploy.
+- Config: `config.yml` (gitignored). Lenticularis base URL: `https://lenti.cloud`.
