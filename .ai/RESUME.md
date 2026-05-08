@@ -1,3 +1,31 @@
+# Resume Notes — 2026-05-08
+
+## What Was Done This Session
+
+### v0.3.1 released and confirmed working on PRD
+
+Tagged and pushed v0.3.1 (all fixes below confirmed working on lsmfapi.lg4.ch).
+
+### README updated to reflect v0.3.0 state
+
+Major corrections: CH2 h34–120 hourly / 4×/day; CH1 10 members dynamic; removed `cloud_base_convective` + `boundary_layer_height` (HBAS_CON/HPBL not in EPS catalog); added altitude-winds and stations endpoints to API overview; corrected architecture (GRIB cache, RH via TD_2M, updated repo layout); scheduler cron times replacing interval config; config table cleaned of non-existent scheduler keys; roadmap restructured. `pyproject.toml` bumped 0.2.0 → 0.3.0.
+
+### CI eccodes version mismatch fixed
+
+`ubuntu-latest` (Ubuntu 24.04) ships `libeccodes 2.34.1` via apt. `eccodes-cosmo-resources-python==2.38.3.1` definition files require ≥2.38 — the COSMO parser failed with a syntax error, all GRIB shortNames came back `<unknown>`, `_read_grid_coords` raised RuntimeError. Fix: removed apt libeccodes install; added Miniforge step to install `eccodes=2.38.3` from conda-forge; set `LD_LIBRARY_PATH=$HOME/miniforge/lib` so Python `findlibs` resolves the 2.38 C library.
+
+### Traefik cross-routing fixed (PRD/DEV on same host)
+
+`docker-compose.yml` was the base for the DEV overlay. Docker Compose merges label lists, so the DEV container inherited all PRD Traefik labels too. Traefik load-balanced between PRD and DEV for `lsmfapi.lg4.ch` — dashboard flipped between "no data" (fresh PRD) and "all ready" (DEV with warm cache). Fix: stripped all Traefik labels from `docker-compose.yml`. PRD compose file lives outside this repo on the XPS server.
+
+### Scheduler warm-up / cron race fixed
+
+Root cause: container started at 19:58Z, warm-up used `ref_dt=12:00Z` (118 min past 18Z, guard `< 2h` = true). At exactly 20:00Z the cron fired; `_latest_ref_dt()` returned `18:00Z` (7200s = not `< 7200`). New `grib_run_dir("ch1", 18:00Z)` called `_purge_stale` which deleted the `20260508T1200Z/` directory mid-download. All in-flight writes (U_10M h=2,3,4,5) failed with `FileNotFoundError`.
+
+Fix: added `_ch1_lock` / `_ch2_lock` asyncio locks in `scheduler.py`. If a collection is already running, the incoming trigger logs a skip and returns immediately. No concurrent same-model runs → no cross-ref_dt purge race.
+
+---
+
 # Resume Notes — 2026-04-30
 
 ## Integration test — E2E collection smoke test
