@@ -1,3 +1,69 @@
+# Resume Notes — 2026-05-15
+
+## What Was Done This Session
+
+### v0.3.2 — Thermal Forecast Grid
+
+#### New `SURFACE_VARS` entries: LCL_ML, LFC_ML, TKE
+
+Added three variables to `SURFACE_VARS` in `icon_ch1_eps.py` (shared with CH2 via import): `LCL_ML` (Lifted Condensation Level, m), `LFC_ML` (Level of Free Convection, m), `TKE` (Turbulent Kinetic Energy, J/kg). These are used only by the thermal grid — not exposed in the station forecast response.
+
+#### `_build_thermal_grid_cache()` in `icon_ch1_eps.py` (imported by CH2)
+
+New function that reads GRIB files from the run's tmpdir and builds a `ThermalGridCache`:
+- De-accumulates `ASWDIR_S`, `ASWDIFD_S`, `DURSUN` (same pattern as station collector)
+- Clips `CIN_ML` fill value (−999.9 → NaN)
+- Computes ensemble median, min, max for 12 fields: `solar`, `sunshine`, `cloud_cover`, `cloud_low`, `cloud_mid`, `cloud_high`, `freezing_level`, `cape`, `cin`, `lcl`, `lfc`, `tke`
+- Samples all fields onto a fixed ~1 km regular lat/lon grid over Switzerland using KD-tree indices (same grid as wind-grid cache)
+- Shape: `[n_frames, n_lat × n_lon]` per field (3 arrays per field: median/min/max)
+
+CH1 runs it over h0–h33; CH2 runs it over h34–h120 — same model slice split as station cache.
+
+#### `ThermalGridCache`, `ThermalGridResponse`, `ThermalGridFrame` models
+
+Added to `models/forecast.py`. `ThermalGridCache` is a `@dataclass` (not Pydantic) holding numpy arrays. `ThermalGridResponse` / `ThermalGridFrame` are Pydantic models for the API response.
+
+#### Cache persistence — `.npz` files
+
+`database/cache.py` saves/loads two `.npz` files: `/app/data/thermal_grid_cache_ch1.npz` and `_ch2.npz`. `get_thermal_grid_cache()` merges CH1+CH2 on the fly (same pattern as station cache). `set_thermal_grid_cache()` routes by `data.model`.
+
+#### `GET /api/forecast/thermal-grid`
+
+Added to `api/routers/forecast.py`. Same bbox/stride_km interface as wind-grid. Returns `ThermalGridResponse` — one `ThermalGridFrame` per forecast hour with 36 nullable float lists (12 fields × median/min/max).
+
+#### Dashboard thermal grid cache card
+
+`dashboard.py` exposes `thermal_grid_cache_detail()`. `dashboard.html` + `dashboard.js` now show a "Thermal Grid Cache" model card with warm/cold status, n_points, grid dimensions, CH1/CH2 frame counts.
+
+#### Data Inspector thermal grid section
+
+`data.html` + `data.js` gained a "Thermal Forecast Grid" section: stride_km selector, Load button, JSON viewer — same pattern as the wind-grid and altitude-winds sections.
+
+### Accuracy GUI removed — router consolidated into dashboard.py
+
+The accuracy analysis GUI (`static/index.html`, `static/index.js`) was removed entirely — it was calling Lenticularis directly from the browser (CORS-blocked). The `accuracy.py` router was deleted and its surviving routes migrated:
+- `/data` (Data Inspector page) → `dashboard.py`
+- `/api/stations` (Lenticularis proxy) → `dashboard.py`
+- `/api/meta` (returns `lenticularis_base_url`) → **removed** (was only used by deleted JS)
+
+`main.py` updated to remove `accuracy` router import.
+
+## Key Files
+
+```
+src/lsmfapi/collectors/icon_ch1_eps.py   — CH1 collector; _build_thermal_grid_cache() defined here
+src/lsmfapi/collectors/icon_ch2_eps.py   — CH2 collector; imports _build_thermal_grid_cache from CH1
+src/lsmfapi/models/forecast.py           — ThermalGridCache / ThermalGridResponse / ThermalGridFrame
+src/lsmfapi/database/cache.py            — get/set_thermal_grid_cache, _save/_load_thermal_grid_cache
+src/lsmfapi/api/routers/forecast.py      — GET /api/forecast/thermal-grid endpoint
+src/lsmfapi/api/routers/dashboard.py     — merged /data + /api/stations + thermal_grid_cache_detail
+src/lsmfapi/api/main.py                  — accuracy router removed
+static/dashboard.html / dashboard.js     — thermal grid cache card
+static/data.html / data.js               — thermal grid section in Data Inspector
+```
+
+---
+
 # Resume Notes — 2026-05-08
 
 ## What Was Done This Session

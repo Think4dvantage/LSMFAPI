@@ -1,6 +1,6 @@
 # Feature History & Backlog
 
-## Current Version: v0.3.1 (shipped 2026-05-08)
+## Current Version: v0.3.2 (in progress)
 
 ### Shipped Milestones
 
@@ -10,6 +10,7 @@
 | v0.2 | Dashboard, Data Inspector, GitHub Actions Docker pipeline, CH1/CH2 cache merge |
 | v0.3 | Hourly CH2 tail (h34–120), 4×/day schedule, NULL fix (dynamic N_MEMBERS), GRIB persistence cache, dashboard ok/failed counts, error recording, HBAS_CON/HPBL removed |
 | v0.3.1 | CI eccodes fix, Traefik label isolation (PRD/DEV), scheduler lock (warm-up/cron race) |
+| v0.3.2 | Thermal grid endpoint: `GET /api/forecast/thermal-grid` — LCL_ML, LFC_ML, TKE added to SURFACE_VARS; `_build_thermal_grid_cache()` in CH1 + CH2; `ThermalGridCache` with npz persistence |
 
 ---
 
@@ -57,6 +58,24 @@
 
 ---
 
+## v0.3.2 — Thermal Forecast Grid (in progress)
+
+- Added `LCL_ML`, `LFC_ML`, `TKE` to `SURFACE_VARS` (shared by CH1 + CH2)
+- New `_build_thermal_grid_cache()` function in `icon_ch1_eps.py` (imported by CH2):
+  - De-accumulates `ASWDIR_S`, `ASWDIFD_S`, `DURSUN`; clips CIN fill value (−999.9 → NaN)
+  - Samples 12 fields on the same ~1 km regular grid as wind-grid using KD-tree indices
+  - Returns `ThermalGridCache` dataclass (numpy arrays: shape `[n_frames, n_grid_pts]` per field)
+- `ThermalGridCache` + `ThermalGridResponse` + `ThermalGridFrame` models in `models/forecast.py`
+- Cache persistence: saved/loaded as `.npz` files alongside wind-grid cache
+- `GET /api/forecast/thermal-grid?bbox=&stride_km=` endpoint (same bbox/stride_km interface as wind-grid)
+  - Fields: `solar` (W/m²), `sunshine` (min/h), `cloud_cover/cloud_low/cloud_mid/cloud_high` (%), `freezing_level` (m), `cape`/`cin`/`lcl`/`lfc`/`tke` (J/kg or m)
+- Accuracy GUI (`static/index.html`, `static/index.js`) removed — Data Inspector (`/data`) is the only GUI alongside Dashboard
+- `accuracy.py` router merged into `dashboard.py`: `/api/stations` proxy + `/data` page moved; `/api/meta` endpoint removed
+- Dashboard thermal grid cache card added (warm/cold, n_points, CH1/CH2 frames)
+- Data Inspector updated with Thermal Forecast Grid section
+
+---
+
 ## v0.4 — Recipes (not started)
 
 - `Recipe` + `RecipeRule` SQLite models (additive / multiplicative corrections per variable, per station or global)
@@ -80,7 +99,3 @@
 ## Known Issues (not yet fixed)
 
 - `sunshine_minutes` wrong on CH2 first step (h=34 accumulation spans 34h not 1h)
-- `cin: -999.9` ICON fill value should map to null (clip CIN_ML where < -900)
-- Altitude winds (U/V/W) all null — eccodes level-type mismatch or STAC search issue, not yet investigated
-- Accuracy GUI `fetchActuals` / `fetchForecasts` call Lenticularis directly → CORS-blocked
-- Wind-grid endpoint is a stub (`set_grid_forecast` never called by collectors)

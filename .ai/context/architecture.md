@@ -59,7 +59,10 @@ def get_station_altitude_winds(station_key: str) -> AltitudeWindsResponse | None
 def set_station_altitude_winds(station_key: str, data: AltitudeWindsResponse) -> None: ...
 def get_grid_wind_cache() -> GridWindCache | None: ...
 def set_grid_wind_cache(data: GridWindCache) -> None: ...
-def save_cache() -> None: ...   # atomic write to /app/data/cache.json
+def get_thermal_grid_cache() -> ThermalGridCache | None: ...
+def set_thermal_grid_cache(data: ThermalGridCache) -> None: ...
+    # Merges CH1 (h0–h33) and CH2 (h34–h120) into one ThermalGridCache, same pattern as wind grid
+def save_cache() -> None: ...   # atomic write to /app/data/cache.json (+ thermal .npz)
 def load_cache() -> None: ...   # restore all caches from /app/data/cache.json on startup
 def cache_stats() -> dict: ...  # keys count, last_populated_at — for health/debug
 ```
@@ -173,7 +176,10 @@ Legend — Accum: field is accumulated from model start; must be de-accumulated 
 | Boundary layer height | `HPBL` | no | **NOT published in EPS catalog** — removed from SURFACE_VARS |
 | Freezing level | `HZEROCL` | no | m ASL height of 0 °C isotherm |
 | Mixed-layer CAPE | `CAPE_ML` | no | J/kg — convective energy (0 = stable) |
-| Mixed-layer CIN | `CIN_ML` | no | J/kg — convective inhibition (negative) |
+| Mixed-layer CIN | `CIN_ML` | no | J/kg — convective inhibition (negative); ICON fill = −999.9 → clipped to NaN |
+| Lifted Condensation Level | `LCL_ML` | no | m — cloud base proxy for thermal height |
+| Level of Free Convection | `LFC_ML` | no | m — onset of free convective lift |
+| Turbulent Kinetic Energy | `TKE` | no | J/kg — boundary-layer turbulence measure |
 
 #### Pressure-level / 3D fields (typeOfLevel = isobaricInhPa)
 
@@ -316,11 +322,11 @@ No authentication. All endpoints are open — access is controlled at the networ
 ### Forecast
 - `GET /api/forecast/station` — `?station_id=&hours=` → hourly ForecastResponse (probable + min + max per variable, 120h max); served from in-memory cache. Does NOT include pressure-level winds.
 - `GET /api/forecast/altitude-winds` — `?station_id=&hours=` → AltitudeWindsResponse; per-hour wind speed, direction, vertical wind at 9 altitude bands (500–5000m ASL); served from in-memory cache
-- `GET /api/forecast/wind-grid` — `?date=YYYY-MM-DD&level_m=` → GridResponse (stub — `set_grid_forecast` not yet called by any collector)
+- `GET /api/forecast/wind-grid` — `?bbox=lat_min,lat_max,lon_min,lon_max&stride_km=` → GridForecastResponse; ensemble-median wind speed + direction at 9 altitude bands on a regular ~1 km spatial grid over Switzerland
+- `GET /api/forecast/thermal-grid` — `?bbox=lat_min,lat_max,lon_min,lon_max&stride_km=` → ThermalGridResponse; ensemble-median thermal/convection fields (solar radiation, sunshine, cloud covers, freezing level, CAPE, CIN, LCL, LFC, TKE) on the same ~1 km regular grid; stride_km default 10, accepted: 1,2,5,10
 
-### Accuracy GUI + proxy
-- `GET /accuracy` — serves `static/index.html`
-- `GET /api/meta` — returns `{"lenticularis_base_url": "..."}` for JS use
+### Data Inspector + proxy
+- `GET /data` — serves `static/data.html` (Data Inspector GUI — query station, altitude-wind, and thermal-grid endpoints)
 - `GET /api/stations` — **proxy** to `{lenticularis.base_url}/api/stations`; avoids browser CORS.
   Returns the Lenticularis station array as-is (fields: `station_id`, `name`, `latitude`, `longitude`, `elevation`, ...)
 
