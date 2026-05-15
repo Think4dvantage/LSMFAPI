@@ -35,7 +35,8 @@
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
     pre#station-json,
-    pre#wind-json {
+    pre#wind-json,
+    pre#thermal-json {
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -60,9 +61,8 @@
   <header>
     <h1>LSMFAPI</h1>
     <nav>
-      <a href="/accuracy">Accuracy Analysis</a>
+      <a href="/dashboard">Dashboard</a>
       <a href="/data" class="active" style="margin-left:12px;">Data Inspector</a>
-      <a href="/dashboard" style="margin-left:12px;">Dashboard</a>
     </nav>
   </header>
 
@@ -70,6 +70,7 @@
     <div class="tabs">
       <button class="tab-btn active" data-tab="station">Station Forecast</button>
       <button class="tab-btn" data-tab="wind">Wind Forecast Grid</button>
+      <button class="tab-btn" data-tab="thermal">Thermal Forecast Grid</button>
     </div>
 
     <!-- Station Forecast tab -->
@@ -119,6 +120,29 @@
         <pre id="wind-json"></pre>
       </div>
       <p id="wind-loading" class="muted" style="display:none;">Loading…</p>
+    </div>
+    <!-- Thermal Forecast Grid tab -->
+    <div class="tab-panel" id="tab-thermal">
+      <div class="card">
+        <div class="form-row">
+          <div class="form-group">
+            <label for="thermal-stride-select">Grid spacing (km)</label>
+            <select id="thermal-stride-select">
+              <option value="10" selected>10 km</option>
+              <option value="5">5 km</option>
+              <option value="2">2 km</option>
+              <option value="1">1 km</option>
+            </select>
+          </div>
+          <button id="thermal-load-btn">Load</button>
+        </div>
+        <p id="thermal-error" class="error" style="margin-top:8px;display:none;"></p>
+      </div>
+      <div id="thermal-result" style="display:none;">
+        <p class="status-bar" id="thermal-status"></p>
+        <pre id="thermal-json"></pre>
+      </div>
+      <p id="thermal-loading" class="muted" style="display:none;">Loading…</p>
     </div>
   </main>
 

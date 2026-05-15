@@ -13,7 +13,7 @@ from scipy.spatial import cKDTree
 from lsmfapi.collectors.base import BaseCollector
 from lsmfapi.collectors.grib_cache import grib_run_dir
 from lsmfapi.config import get_config
-from lsmfapi.database.cache import set_grid_wind_cache, set_station_altitude_winds, set_station_forecast
+from lsmfapi.database.cache import set_grid_wind_cache, set_station_altitude_winds, set_station_forecast, set_thermal_grid_cache
 from lsmfapi.database import collection_state as _cs
 from lsmfapi.database import telemetry as _telemetry
 from lsmfapi.models.forecast import (
@@ -24,6 +24,7 @@ from lsmfapi.models.forecast import (
     GridWindCache,
     StationForecastHour,
     StationForecastResponse,
+    ThermalGridCache,
 )
 from lsmfapi.services.ensemble import compute_stats, compute_wind_direction_stats
 
@@ -57,11 +58,12 @@ SURFACE_VARS: list[str] = [
     "TOT_PREC", "DURSUN", "ASWDIR_S", "ASWDIFD_S",
     "CLCT", "CLCL", "CLCM", "CLCH",
     "HZEROCL", "CAPE_ML", "CIN_ML",
+    "LCL_ML", "LFC_ML", "TKE",
 ]
 ACCUM_VARS: frozenset[str] = frozenset({"TOT_PREC", "DURSUN", "ASWDIR_S", "ASWDIFD_S"})
 
 PRESSURE_VARS: list[str] = ["U", "V", "W"]   # full set used by CH2
-CH1_PRESSURE_VARS: list[str] = ["U", "V"]    # W omitted — CH1 altitude winds are null; U/V needed for grid
+CH1_PRESSURE_VARS: list[str] = ["U", "V", "W"]  # W confirmed available in CH1 STAC catalog at same pressure levels as U/V
 ALTITUDE_TO_HPA: dict[int, int] = {
     500: 950, 800: 920, 1000: 900, 1500: 850, 2000: 800,
     2500: 750, 3000: 700, 4000: 600, 5000: 500,
@@ -257,21 +259,75 @@ def _build_level_indices(level_hpa: np.ndarray) -> dict[int, int]:
 
 def _read_grib2_eccodes(
     path: Path,
+    extract_indices: np.ndarray | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Read a forecast GRIB2 file with eccodes, returning (values, level_hpa).
 
-    values shape:
+    Two-pass read: pass 1 collects metadata only; pass 2 fills a pre-allocated
+    array directly, one message at a time. This avoids accumulating all message
+    arrays in memory simultaneously before building the output array.
+
+    When extract_indices is provided, only those grid-point indices are stored.
+    values shape without extract_indices:
       Surface  : (n_members, n_points)
       Multi-lev: (n_members, n_levels, n_points)
+    values shape with extract_indices:
+      Surface  : (n_members, len(extract_indices))
+      Multi-lev: (n_members, n_levels, len(extract_indices))
     level_hpa  : None for surface, ndarray of hPa for pressure-level files.
                  For generalVerticalLayer files the hPa values are approximated
                  from the embedded hybrid (pv) coordinate at standard sea-level
                  pressure — use _build_level_indices() for a nearest-match lookup.
     """
-    messages: list[tuple[int, int, np.ndarray]] = []
-    _pv: np.ndarray | None = None
+    # Pass 1: metadata scan — no values arrays stored
+    unique_members: set[int] = set()
+    unique_levels: set[int] = set()
+    n_points: int = 0
     _level_type: str = ""
+    _pv: np.ndarray | None = None
 
+    try:
+        with open(str(path), "rb") as f:
+            while True:
+                msg = eccodes.codes_grib_new_from_file(f)
+                if msg is None:
+                    break
+                try:
+                    unique_members.add(int(_eccodes_get(msg, "perturbationNumber", default=0)))
+                    unique_levels.add(int(_eccodes_get(msg, "level", default=0)))
+                    if n_points == 0:
+                        n_points = eccodes.codes_get_size(msg, "values")
+                    if not _level_type:
+                        _level_type = _eccodes_get(msg, "typeOfLevel", default="") or ""
+                        if _level_type == "generalVerticalLayer" and _pv is None:
+                            try:
+                                _pv = eccodes.codes_get_array(msg, "pv").astype(np.float64)
+                            except Exception:
+                                pass
+                finally:
+                    eccodes.codes_release(msg)
+    except Exception as exc:
+        logger.error("eccodes read failed for %s: %s", path.name, exc)
+        raise
+
+    if not unique_members or n_points == 0:
+        logger.warning("No GRIB2 messages in %s", path.name)
+        return None, None
+
+    sorted_members = sorted(unique_members)
+    sorted_levels  = sorted(unique_levels)
+    is_surface = len(sorted_levels) == 1
+
+    member_idx = {m: i for i, m in enumerate(sorted_members)}
+    level_idx  = {l: i for i, l in enumerate(sorted_levels)}
+
+    n_out = len(extract_indices) if extract_indices is not None else n_points
+    if is_surface:
+        arr = np.full((len(sorted_members), n_out), np.nan, dtype=np.float32)
+    else:
+        arr = np.full((len(sorted_members), len(sorted_levels), n_out), np.nan, dtype=np.float32)
+
+    # Pass 2: fill arr directly — each message's values array is released immediately
     try:
         with open(str(path), "rb") as f:
             while True:
@@ -282,59 +338,196 @@ def _read_grib2_eccodes(
                     member = int(_eccodes_get(msg, "perturbationNumber", default=0))
                     level  = int(_eccodes_get(msg, "level", default=0))
                     values = eccodes.codes_get_array(msg, "values").astype(np.float32)
-                    if not _level_type:
-                        _level_type = _eccodes_get(msg, "typeOfLevel", default="") or ""
-                        if _level_type == "generalVerticalLayer" and _pv is None:
-                            try:
-                                _pv = eccodes.codes_get_array(msg, "pv").astype(np.float64)
-                            except Exception:
-                                pass
-                    messages.append((member, level, values))
+                    if extract_indices is not None:
+                        values = values[extract_indices]
+                    mi = member_idx[member]
+                    if is_surface:
+                        arr[mi] = values
+                    else:
+                        arr[mi, level_idx[level]] = values
                 finally:
                     eccodes.codes_release(msg)
     except Exception as exc:
         logger.error("eccodes read failed for %s: %s", path.name, exc)
         raise
 
-    if not messages:
-        logger.warning("No GRIB2 messages in %s", path.name)
-        return None, None
-
-    unique_members = sorted({m[0] for m in messages})
-    unique_levels  = sorted({m[1] for m in messages})
-    n_points = len(messages[0][2])
-
-    member_idx = {m: i for i, m in enumerate(unique_members)}
-    level_idx  = {l: i for i, l in enumerate(unique_levels)}
-
-    if len(unique_levels) == 1:
-        arr = np.full((len(unique_members), n_points), np.nan, dtype=np.float32)
-        for member, level, values in messages:
-            arr[member_idx[member]] = values
-        return arr, None
-    else:
-        arr = np.full(
-            (len(unique_members), len(unique_levels), n_points), np.nan, dtype=np.float32
-        )
-        for member, level, values in messages:
-            arr[member_idx[member], level_idx[level]] = values
+    if not is_surface:
         if _level_type == "generalVerticalLayer" and _pv is not None:
-            level_coords = _approx_hybrid_to_pressure_hpa(unique_levels, _pv)
+            level_coords = _approx_hybrid_to_pressure_hpa(sorted_levels, _pv)
             logger.debug(
                 "generalVerticalLayer: %d levels, approx hPa range [%.0f, %.0f]",
                 len(level_coords), level_coords.min(), level_coords.max(),
             )
         else:
-            level_coords = np.array(unique_levels, dtype=float)
+            level_coords = np.array(sorted_levels, dtype=float)
         return arr, level_coords
 
-
-def _extract_station(arr: np.ndarray, flat_idx: int) -> np.ndarray:
-    """Extract values at one station. Returns (n_members,) or (n_members, n_levels)."""
-    return arr[..., flat_idx]
+    return arr, None
 
 
 # ---------- Shared grid helper (used by CH1 and CH2 collectors) ----------
+
+_THERMAL_ACCUM_VARS: frozenset[str] = frozenset({"ASWDIR_S", "ASWDIFD_S", "DURSUN"})
+_THERMAL_SURFACE_VARS: list[str] = [
+    "ASWDIR_S", "ASWDIFD_S", "DURSUN",
+    "CLCT", "CLCL", "CLCM", "CLCH",
+    "HZEROCL", "CAPE_ML", "CIN_ML", "LCL_ML", "LFC_ML", "TKE",
+]
+_CIN_FILL_THRESHOLD = -900.0
+
+
+def _build_thermal_grid_cache(
+    horizons: list[int],
+    ref_dt: datetime,
+    tmpdir: Path,
+    sample_indices: np.ndarray,
+    n_lat: int,
+    n_lon: int,
+    model: str,
+    accum_prior_h: int | None = None,
+) -> ThermalGridCache:
+    """Build a ThermalGridCache from surface GRIB files kept on disk in tmpdir.
+
+    Reads one horizon at a time. Accumulated fields (solar, sunshine) are de-accumulated
+    by differencing consecutive steps. If accum_prior_h is given, loads that step as the
+    initial accumulated baseline (needed for CH2 which starts at h=34).
+
+    Files are NOT deleted — grib_run_dir() manages cleanup on the next collection run.
+    """
+    n_grid = len(sample_indices)
+    n_horizons = len(horizons)
+    _nan = lambda: np.full((n_horizons, n_grid), np.nan, dtype=np.float32)  # noqa: E731
+
+    solar_cache        = _nan(); solar_min_cache        = _nan(); solar_max_cache        = _nan()
+    sunshine_cache     = _nan(); sunshine_min_cache     = _nan(); sunshine_max_cache     = _nan()
+    cloud_cover_cache  = _nan(); cloud_cover_min_cache  = _nan(); cloud_cover_max_cache  = _nan()
+    cloud_low_cache    = _nan(); cloud_low_min_cache    = _nan(); cloud_low_max_cache    = _nan()
+    cloud_mid_cache    = _nan(); cloud_mid_min_cache    = _nan(); cloud_mid_max_cache    = _nan()
+    cloud_high_cache   = _nan(); cloud_high_min_cache   = _nan(); cloud_high_max_cache   = _nan()
+    freezing_level_cache = _nan(); freezing_level_min_cache = _nan(); freezing_level_max_cache = _nan()
+    cape_cache         = _nan(); cape_min_cache         = _nan(); cape_max_cache         = _nan()
+    cin_cache          = _nan(); cin_min_cache          = _nan(); cin_max_cache          = _nan()
+    lcl_cache          = _nan(); lcl_min_cache          = _nan(); lcl_max_cache          = _nan()
+    lfc_cache          = _nan(); lfc_min_cache          = _nan(); lfc_max_cache          = _nan()
+    tke_cache          = _nan(); tke_min_cache          = _nan(); tke_max_cache          = _nan()
+
+    def _read(var: str, h: int) -> np.ndarray | None:
+        dest = tmpdir / f"{var}_{h:03d}.grib2"
+        if not dest.exists():
+            return None
+        try:
+            arr, _ = _read_grib2_eccodes(dest, extract_indices=sample_indices)
+            if arr is None or arr.ndim < 2:
+                return None
+            if arr.ndim == 3:
+                arr = arr[:, -1, :]  # take bottom model level
+            return arr.astype(np.float64)
+        except Exception as exc:
+            logger.warning("ThermalGrid parse %s h=%d: %s", var, h, exc)
+            return None
+
+    def _median(arr: np.ndarray) -> np.ndarray:
+        return np.nanmedian(arr, axis=0).astype(np.float32)
+
+    def _nanmin(arr: np.ndarray) -> np.ndarray:
+        return np.nanmin(arr, axis=0).astype(np.float32)
+
+    def _nanmax(arr: np.ndarray) -> np.ndarray:
+        return np.nanmax(arr, axis=0).astype(np.float32)
+
+    # Load prior accumulated values for deaccumulation baseline
+    prev_aswdir: np.ndarray | None = None
+    prev_aswdifd: np.ndarray | None = None
+    prev_dursun: np.ndarray | None = None
+    if accum_prior_h is not None:
+        prev_aswdir  = _read("ASWDIR_S",  accum_prior_h)
+        prev_aswdifd = _read("ASWDIFD_S", accum_prior_h)
+        prev_dursun  = _read("DURSUN",    accum_prior_h)
+
+    for h_idx, h in enumerate(horizons):
+        # --- accumulated: solar radiation ---
+        raw_dir  = _read("ASWDIR_S",  h)
+        raw_difd = _read("ASWDIFD_S", h)
+        if raw_dir is not None and raw_difd is not None:
+            delta_dir  = raw_dir  - (prev_aswdir  if prev_aswdir  is not None else 0.0)
+            delta_difd = raw_difd - (prev_aswdifd if prev_aswdifd is not None else 0.0)
+            solar_w_m2 = np.clip(delta_dir + delta_difd, 0.0, None) / 3600.0  # J/m² → W/m²
+            solar_cache[h_idx]     = _median(solar_w_m2)
+            solar_min_cache[h_idx] = _nanmin(solar_w_m2)
+            solar_max_cache[h_idx] = _nanmax(solar_w_m2)
+            prev_aswdir  = raw_dir
+            prev_aswdifd = raw_difd
+
+        # --- accumulated: sunshine ---
+        raw_dursun = _read("DURSUN", h)
+        if raw_dursun is not None:
+            delta_dursun = raw_dursun - (prev_dursun if prev_dursun is not None else 0.0)
+            sunshine_min = np.clip(delta_dursun, 0.0, None) / 60.0  # s → min
+            sunshine_cache[h_idx]     = _median(sunshine_min)
+            sunshine_min_cache[h_idx] = _nanmin(sunshine_min)
+            sunshine_max_cache[h_idx] = _nanmax(sunshine_min)
+            prev_dursun = raw_dursun
+
+        # --- instantaneous surface fields ---
+        for arr, med_cache, min_cache, max_cache in (
+            (_read("CLCT",    h), cloud_cover_cache,   cloud_cover_min_cache,   cloud_cover_max_cache),
+            (_read("CLCL",    h), cloud_low_cache,     cloud_low_min_cache,     cloud_low_max_cache),
+            (_read("CLCM",    h), cloud_mid_cache,     cloud_mid_min_cache,     cloud_mid_max_cache),
+            (_read("CLCH",    h), cloud_high_cache,    cloud_high_min_cache,    cloud_high_max_cache),
+            (_read("HZEROCL", h), freezing_level_cache, freezing_level_min_cache, freezing_level_max_cache),
+            (_read("LCL_ML",  h), lcl_cache,           lcl_min_cache,           lcl_max_cache),
+            (_read("LFC_ML",  h), lfc_cache,           lfc_min_cache,           lfc_max_cache),
+            (_read("TKE",     h), tke_cache,           tke_min_cache,           tke_max_cache),
+        ):
+            if arr is not None:
+                med_cache[h_idx] = _median(arr)
+                min_cache[h_idx] = _nanmin(arr)
+                max_cache[h_idx] = _nanmax(arr)
+
+        cape_arr = _read("CAPE_ML", h)
+        if cape_arr is not None:
+            cape_cache[h_idx]     = _median(cape_arr)
+            cape_min_cache[h_idx] = _nanmin(cape_arr)
+            cape_max_cache[h_idx] = _nanmax(cape_arr)
+
+        cin_arr = _read("CIN_ML", h)
+        if cin_arr is not None:
+            cin_masked = np.where(cin_arr < _CIN_FILL_THRESHOLD, np.nan, cin_arr)
+            cin_cache[h_idx]     = _median(cin_masked)
+            cin_min_cache[h_idx] = _nanmin(cin_masked)
+            cin_max_cache[h_idx] = _nanmax(cin_masked)
+
+        logger.debug("ThermalGrid %s h=%d computed", model, h)
+
+    lat_arr = np.arange(GRID_LAT_MAX, GRID_LAT_MIN - GRID_STEP_DEG / 2, -GRID_STEP_DEG)
+    lon_arr = np.arange(GRID_LON_MIN, GRID_LON_MAX + GRID_STEP_DEG / 2, GRID_STEP_DEG)
+    lon_grid_2d, lat_grid_2d = np.meshgrid(lon_arr, lat_arr)
+
+    return ThermalGridCache(
+        model=model,
+        init_time=ref_dt,
+        lats=lat_grid_2d.ravel().astype(np.float32),
+        lons=lon_grid_2d.ravel().astype(np.float32),
+        n_lat=n_lat,
+        n_lon=n_lon,
+        lat_max=float(lat_arr[0]),
+        lon_min=float(lon_arr[0]),
+        step_deg=GRID_STEP_DEG,
+        valid_times=[ref_dt + timedelta(hours=h) for h in horizons],
+        solar=solar_cache,             solar_min=solar_min_cache,             solar_max=solar_max_cache,
+        sunshine=sunshine_cache,       sunshine_min=sunshine_min_cache,       sunshine_max=sunshine_max_cache,
+        cloud_cover=cloud_cover_cache, cloud_cover_min=cloud_cover_min_cache, cloud_cover_max=cloud_cover_max_cache,
+        cloud_low=cloud_low_cache,     cloud_low_min=cloud_low_min_cache,     cloud_low_max=cloud_low_max_cache,
+        cloud_mid=cloud_mid_cache,     cloud_mid_min=cloud_mid_min_cache,     cloud_mid_max=cloud_mid_max_cache,
+        cloud_high=cloud_high_cache,   cloud_high_min=cloud_high_min_cache,   cloud_high_max=cloud_high_max_cache,
+        freezing_level=freezing_level_cache, freezing_level_min=freezing_level_min_cache, freezing_level_max=freezing_level_max_cache,
+        cape=cape_cache,               cape_min=cape_min_cache,               cape_max=cape_max_cache,
+        cin=cin_cache,                 cin_min=cin_min_cache,                 cin_max=cin_max_cache,
+        lcl=lcl_cache,                 lcl_min=lcl_min_cache,                 lcl_max=lcl_max_cache,
+        lfc=lfc_cache,                 lfc_min=lfc_min_cache,                 lfc_max=lfc_max_cache,
+        tke=tke_cache,                 tke_min=tke_min_cache,                 tke_max=tke_max_cache,
+    )
+
 
 def _build_grid_wind_cache(
     horizons: list[int],
@@ -372,14 +565,13 @@ def _build_grid_wind_cache(
             if not dest.exists():
                 continue
             try:
-                arr, _ = _read_grib2_eccodes(dest)
+                arr, _ = _read_grib2_eccodes(dest, extract_indices=sample_indices)
                 if arr is None or arr.ndim < 3:
                     continue
-                extracted = arr[:, :, sample_indices]  # (n_members, n_levels, n_grid)
                 if var == "U":
-                    u_grid = extracted
+                    u_grid = arr
                 else:
-                    v_grid = extracted
+                    v_grid = arr
             except Exception as exc:
                 logger.warning("Grid parse %s h=%d: %s", var, h, exc)
             finally:
@@ -409,12 +601,12 @@ def _build_grid_wind_cache(
             if not dest.exists():
                 continue
             try:
-                arr, _ = _read_grib2_eccodes(dest)
+                arr, _ = _read_grib2_eccodes(dest, extract_indices=sample_indices)
                 if arr is not None and arr.ndim == 2:
                     if store == "t":
-                        t_arr = arr[:, sample_indices]
+                        t_arr = arr
                     else:
-                        td_arr = arr[:, sample_indices]
+                        td_arr = arr
             except Exception as exc:
                 logger.warning("Grid parse %s h=%d: %s", dest.name, h, exc)
             finally:
@@ -556,16 +748,12 @@ class IconCh1EpsCollector(BaseCollector):
                     return None
 
         try:
-            arr, _level_coords = _read_grib2_eccodes(dest)
+            arr, _level_coords = _read_grib2_eccodes(dest, extract_indices=station_flat_indices)
             if arr is None:
                 logger.warning("eccodes returned None for %s h=%d", variable, horizon_h)
                 return None
-            result = np.stack(
-                [_extract_station(arr, int(idx)) for idx in station_flat_indices],
-                axis=-1,
-            )
-            logger.debug("CH1 data %s h=%d shape=%s", variable, horizon_h, result.shape)
-            return result
+            logger.debug("CH1 data %s h=%d shape=%s", variable, horizon_h, arr.shape)
+            return arr
         except Exception as exc:
             logger.error("eccodes read failed %s h=%d: %s — removing cached file", variable, horizon_h, exc)
             dest.unlink(missing_ok=True)
@@ -589,6 +777,16 @@ class IconCh1EpsCollector(BaseCollector):
         logger.info(
             "CH1 GridWindCache set: %d × %d points, %d levels, %d frames, init_time=%s",
             _GRID_N_LAT, _GRID_N_LON, len(ALTITUDE_TO_HPA), len(HORIZONS), ref_dt.isoformat(),
+        )
+        thermal = _build_thermal_grid_cache(
+            HORIZONS, ref_dt, tmpdir,
+            _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, "icon-ch1",
+            accum_prior_h=None,
+        )
+        set_thermal_grid_cache(thermal)
+        logger.info(
+            "CH1 ThermalGridCache set: %d × %d points, %d frames, init_time=%s",
+            _GRID_N_LAT, _GRID_N_LON, len(HORIZONS), ref_dt.isoformat(),
         )
 
     async def collect(self) -> None:  # noqa: C901
@@ -623,7 +821,7 @@ class IconCh1EpsCollector(BaseCollector):
                     dest = tmpdir / "U_probe.grib2"
                     try:
                         await self.download(u0_url, str(dest))
-                        _, level_hpa = _read_grib2_eccodes(dest)
+                        _, level_hpa = _read_grib2_eccodes(dest, extract_indices=np.array([0]))
                     except Exception as exc:
                         logger.warning("Pressure level probe failed: %s", exc)
                     finally:

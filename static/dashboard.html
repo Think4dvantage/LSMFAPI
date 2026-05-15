@@ -200,9 +200,8 @@
   <header>
     <h1>LSMFAPI</h1>
     <nav>
-      <a href="/accuracy">Accuracy Analysis</a>
+      <a href="/dashboard" class="active">Dashboard</a>
       <a href="/data" style="margin-left:12px;">Data Inspector</a>
-      <a href="/dashboard" class="active" style="margin-left:12px;">Dashboard</a>
     </nav>
   </header>
 
@@ -233,6 +232,7 @@
       <div class="stat-card"><div class="stat-label">Stations with data</div><div class="stat-value" id="ov-stations">—</div><div class="stat-sub" id="ov-stations-sub"></div></div>
       <div class="stat-card"><div class="stat-label">Altitude wind profiles</div><div class="stat-value" id="ov-altwinds">—</div></div>
       <div class="stat-card"><div class="stat-label">Grid points</div><div class="stat-value" id="ov-grid-pts">—</div><div class="stat-sub" id="ov-grid-sub"></div></div>
+      <div class="stat-card"><div class="stat-label">Thermal grid points</div><div class="stat-value" id="ov-thermal-pts">—</div><div class="stat-sub" id="ov-thermal-sub"></div></div>
       <div class="stat-card"><div class="stat-label">Forecast horizon</div><div class="stat-value" id="ov-horizon">—</div><div class="stat-sub" id="ov-horizon-sub"></div></div>
       <div class="stat-card"><div class="stat-label">API requests (session)</div><div class="stat-value" id="ov-requests">—</div><div class="stat-sub" id="ov-requests-sub"></div></div>
       <div class="stat-card"><div class="stat-label">API errors (session)</div><div class="stat-value" id="ov-errors">—</div><div class="stat-sub" id="ov-errors-sub"></div></div>
@@ -281,6 +281,13 @@
           <span class="badge" id="cache-grid-badge">—</span>
         </div>
         <div id="cache-grid-rows"></div>
+      </div>
+      <div class="model-card">
+        <div class="model-header">
+          <span class="model-name">Thermal Grid Cache</span>
+          <span class="badge" id="cache-thermal-badge">—</span>
+        </div>
+        <div id="cache-thermal-rows"></div>
       </div>
     </div>
 

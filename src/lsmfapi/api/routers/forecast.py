@@ -17,6 +17,7 @@ from lsmfapi.database.cache import (
     get_grid_wind_cache,
     get_station_altitude_winds,
     get_station_forecast,
+    get_thermal_grid_cache,
     known_stations,
 )
 from lsmfapi.models.forecast import (
@@ -25,6 +26,8 @@ from lsmfapi.models.forecast import (
     GridFrame,
     GridPoint,
     StationForecastResponse,
+    ThermalGridFrame,
+    ThermalGridResponse,
 )
 
 router = APIRouter(prefix="/api/forecast", tags=["forecast"])
@@ -194,6 +197,94 @@ async def wind_grid(
     response = GridForecastResponse(
         init_time=grid_cache.init_time,
         model=grid_cache.model,
+        stride_km=stride_km,
+        grid=grid_points,
+        frames=frames,
+    )
+    return JSONResponse(response.model_dump(mode="json"))
+
+
+@router.get("/thermal-grid")
+async def thermal_grid(
+    bbox: str = Query(_DEFAULT_BBOX, description="lat_min,lat_max,lon_min,lon_max"),
+    stride_km: int = Query(10, description="Grid spacing in km. Accepted: 1,2,5,10"),
+) -> JSONResponse:
+    """Return gridded thermal forecast (solar, CAPE, CIN, cloud cover, freezing level, etc.).
+
+    Params: bbox (str, default Switzerland), stride_km (int, default 10).
+    Response: ThermalGridResponse — one frame per forecast hour, values parallel to grid list.
+    All values are ensemble medians. NaN fields are returned as null.
+    Errors: 400 bad params, 503 cache warming.
+    """
+    if stride_km not in _VALID_STRIDE_KM:
+        return _err("invalid_stride", f"stride_km must be one of {sorted(_VALID_STRIDE_KM)}", 400)
+
+    try:
+        parts = [float(x) for x in bbox.split(",")]
+        if len(parts) != 4:
+            raise ValueError
+        lat_min, lat_max, lon_min, lon_max = parts
+        if lat_min >= lat_max or lon_min >= lon_max:
+            raise ValueError
+        if not (_DOMAIN_LAT_MIN <= lat_min and lat_max <= _DOMAIN_LAT_MAX):
+            raise ValueError
+        if not (_DOMAIN_LON_MIN <= lon_min and lon_max <= _DOMAIN_LON_MAX):
+            raise ValueError
+    except (ValueError, TypeError):
+        return _err(
+            "invalid_bbox",
+            "bbox must be 'lat_min,lat_max,lon_min,lon_max' within the ICON-CH1 domain "
+            f"(lat {_DOMAIN_LAT_MIN}–{_DOMAIN_LAT_MAX}, lon {_DOMAIN_LON_MIN}–{_DOMAIN_LON_MAX})",
+            400,
+        )
+
+    thermal_cache = get_thermal_grid_cache()
+    if thermal_cache is None:
+        return _err("cache_warming", "Thermal grid forecast not yet available — cache warming in progress", 503)
+
+    # Generate requested regular lat/lon grid
+    req_step = stride_km / 111.0
+    req_lats = np.arange(lat_max, lat_min - req_step / 2, -req_step)
+    req_lons = np.arange(lon_min, lon_max + req_step / 2, req_step)
+    lon_grid, lat_grid = np.meshgrid(req_lons, req_lats)
+    flat_req_lats = lat_grid.ravel()
+    flat_req_lons = lon_grid.ravel()
+    n_pts = len(flat_req_lats)
+
+    # Map each requested point to the nearest pre-sampled 1 km cache cell
+    lat_indices = np.clip(
+        np.round((thermal_cache.lat_max - flat_req_lats) / thermal_cache.step_deg).astype(int),
+        0, thermal_cache.n_lat - 1,
+    )
+    lon_indices = np.clip(
+        np.round((flat_req_lons - thermal_cache.lon_min) / thermal_cache.step_deg).astype(int),
+        0, thermal_cache.n_lon - 1,
+    )
+    flat_cache_indices = lat_indices * thermal_cache.n_lon + lon_indices
+
+    grid_points = [
+        GridPoint(lat=round(float(flat_req_lats[i]), 5), lon=round(float(flat_req_lons[i]), 5))
+        for i in range(n_pts)
+    ]
+
+    def _to_nullable(row: np.ndarray) -> list[float | None]:
+        return [None if math.isnan(float(v)) else round(float(v), 1) for v in row]
+
+    _BASE = ("solar", "sunshine", "cloud_cover", "cloud_low", "cloud_mid", "cloud_high",
+             "freezing_level", "cape", "cin", "lcl", "lfc", "tke")
+    _fields = _BASE + tuple(f"{f}_min" for f in _BASE) + tuple(f"{f}_max" for f in _BASE)
+
+    frames = []
+    for f_idx, valid_time in enumerate(thermal_cache.valid_times):
+        kwargs = {
+            f: _to_nullable(getattr(thermal_cache, f)[f_idx, flat_cache_indices])
+            for f in _fields
+        }
+        frames.append(ThermalGridFrame(valid_time=valid_time, **kwargs))
+
+    response = ThermalGridResponse(
+        init_time=thermal_cache.init_time,
+        model=thermal_cache.model,
         stride_km=stride_km,
         grid=grid_points,
         frames=frames,

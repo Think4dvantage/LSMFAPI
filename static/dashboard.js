@@ -117,6 +117,15 @@ function renderOverview(data) {
     setText("ov-grid-sub", "cache cold");
   }
 
+  const tc = data.thermal_grid_cache;
+  if (tc?.warm) {
+    setText("ov-thermal-pts", (tc.n_points ?? 0).toLocaleString());
+    setText("ov-thermal-sub", `${tc.n_lat} × ${tc.n_lon} · ${tc.forecast_hours} frames`);
+  } else {
+    setText("ov-thermal-pts", "0");
+    setText("ov-thermal-sub", "cache cold");
+  }
+
   // Forecast horizon = how far ahead is the valid_until from now
   const validUntil = gc.warm ? gc.valid_until : sc.valid_until;
   if (validUntil) {
@@ -233,6 +242,28 @@ function renderCacheDetail(data) {
     grBadge.textContent = "cold";
     grBadge.className = "badge badge-idle";
     document.getElementById("cache-grid-rows").innerHTML = modelRows([
+      ["Status", "Not yet populated — waiting for first collection run"],
+    ]);
+  }
+
+  const tc = data.thermal_grid_cache;
+  const thBadge = document.getElementById("cache-thermal-badge");
+  if (tc?.warm) {
+    thBadge.textContent = "warm";
+    thBadge.className = "badge badge-ok";
+    document.getElementById("cache-thermal-rows").innerHTML = modelRows([
+      ["Points", (tc.n_points ?? 0).toLocaleString()],
+      ["Grid size", `${tc.n_lat} × ${tc.n_lon}`],
+      ["CH1 frames", tc.ch1_frames],
+      ["CH2 frames", tc.ch2_frames],
+      ["Total frames", tc.forecast_hours],
+      ["Init time", fmtDt(tc.init_time)],
+      ["Valid until", fmtDt(tc.valid_until)],
+    ]);
+  } else {
+    thBadge.textContent = "cold";
+    thBadge.className = "badge badge-idle";
+    document.getElementById("cache-thermal-rows").innerHTML = modelRows([
       ["Status", "Not yet populated — waiting for first collection run"],
     ]);
   }

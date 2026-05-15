@@ -31,11 +31,11 @@ from lsmfapi.collectors.icon_ch1_eps import (
     SURFACE_VARS,
     _approx_hybrid_to_pressure_hpa,
     _build_grid_wind_cache,
+    _build_thermal_grid_cache,
     _build_level_indices,
     _compute_rh_from_td,
     _deaccumulate,
     _ev_flat,
-    _extract_station,
     _horizon_str,
     _read_grid_coords,
     _read_grib2_eccodes,
@@ -45,7 +45,7 @@ from lsmfapi.collectors.icon_ch1_eps import (
 )
 from lsmfapi.config import get_config
 from lsmfapi.collectors.grib_cache import grib_run_dir
-from lsmfapi.database.cache import set_grid_wind_cache, set_station_altitude_winds, set_station_forecast
+from lsmfapi.database.cache import set_grid_wind_cache, set_station_altitude_winds, set_station_forecast, set_thermal_grid_cache
 from lsmfapi.database import collection_state as _cs
 from lsmfapi.database import telemetry as _telemetry
 from lsmfapi.models.forecast import (
@@ -180,16 +180,12 @@ class IconCh2EpsCollector(BaseCollector):
                     return None
 
         try:
-            arr, _level_coords = _read_grib2_eccodes(dest)
+            arr, _level_coords = _read_grib2_eccodes(dest, extract_indices=station_flat_indices)
             if arr is None:
                 logger.warning("CH2 eccodes returned None for %s h=%d", variable, horizon_h)
                 return None
-            result = np.stack(
-                [_extract_station(arr, int(idx)) for idx in station_flat_indices],
-                axis=-1,
-            )
-            logger.debug("CH2 data %s h=%d shape=%s", variable, horizon_h, result.shape)
-            return result
+            logger.debug("CH2 data %s h=%d shape=%s", variable, horizon_h, arr.shape)
+            return arr
         except Exception as exc:
             logger.error("CH2 eccodes read failed %s h=%d: %s — removing cached file", variable, horizon_h, exc)
             dest.unlink(missing_ok=True)
@@ -227,7 +223,7 @@ class IconCh2EpsCollector(BaseCollector):
                     dest = tmpdir / "U_probe_ch2.grib2"
                     try:
                         await self.download(u0_url, str(dest))
-                        _, level_hpa = _read_grib2_eccodes(dest)
+                        _, level_hpa = _read_grib2_eccodes(dest, extract_indices=np.array([0]))
                     except Exception as exc:
                         logger.warning("CH2 pressure level probe failed: %s", exc)
                     finally:
@@ -502,4 +498,14 @@ class IconCh2EpsCollector(BaseCollector):
         logger.info(
             "CH2 GridWindCache set: %d × %d points, %d levels, %d frames, init_time=%s",
             _GRID_N_LAT, _GRID_N_LON, len(ALTITUDE_TO_HPA), len(HORIZONS), ref_dt.isoformat(),
+        )
+        thermal = _build_thermal_grid_cache(
+            HORIZONS, ref_dt, tmpdir,
+            _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, "icon-ch2",
+            accum_prior_h=ACCUM_PRIOR_H,
+        )
+        set_thermal_grid_cache(thermal)
+        logger.info(
+            "CH2 ThermalGridCache set: %d × %d points, %d frames, init_time=%s",
+            _GRID_N_LAT, _GRID_N_LON, len(HORIZONS), ref_dt.isoformat(),
         )

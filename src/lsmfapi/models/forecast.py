@@ -110,6 +110,114 @@ class GridForecastResponse(BaseModel):
     frames: list[GridFrame]
 
 
+# ---------- Thermal grid ----------
+
+class ThermalGridFrame(BaseModel):
+    valid_time: datetime
+    solar: list[float | None]               # W/m² total incoming solar — ensemble median
+    solar_min: list[float | None]
+    solar_max: list[float | None]
+    sunshine: list[float | None]            # min/h sunshine duration — ensemble median
+    sunshine_min: list[float | None]
+    sunshine_max: list[float | None]
+    cloud_cover: list[float | None]         # % total cloud cover — ensemble median
+    cloud_cover_min: list[float | None]
+    cloud_cover_max: list[float | None]
+    cloud_low: list[float | None]           # % low cloud — ensemble median
+    cloud_low_min: list[float | None]
+    cloud_low_max: list[float | None]
+    cloud_mid: list[float | None]           # % mid cloud — ensemble median
+    cloud_mid_min: list[float | None]
+    cloud_mid_max: list[float | None]
+    cloud_high: list[float | None]          # % high cloud — ensemble median
+    cloud_high_min: list[float | None]
+    cloud_high_max: list[float | None]
+    freezing_level: list[float | None]      # m ASL 0 °C isotherm — ensemble median
+    freezing_level_min: list[float | None]
+    freezing_level_max: list[float | None]
+    cape: list[float | None]                # J/kg mixed-layer CAPE — ensemble median
+    cape_min: list[float | None]
+    cape_max: list[float | None]
+    cin: list[float | None]                 # J/kg mixed-layer CIN (null = ICON fill) — ensemble median
+    cin_min: list[float | None]
+    cin_max: list[float | None]
+    lcl: list[float | None]                 # m lifted condensation level — ensemble median
+    lcl_min: list[float | None]
+    lcl_max: list[float | None]
+    lfc: list[float | None]                 # m level of free convection — ensemble median
+    lfc_min: list[float | None]
+    lfc_max: list[float | None]
+    tke: list[float | None]                 # J/kg turbulent kinetic energy — ensemble median
+    tke_min: list[float | None]
+    tke_max: list[float | None]
+
+
+class ThermalGridResponse(BaseModel):
+    """GET /api/forecast/thermal-grid — errors: 400 bad params, 503 cache warming."""
+    init_time: datetime
+    model: str
+    stride_km: int
+    grid: list[GridPoint]
+    frames: list[ThermalGridFrame]
+
+
+# ---------- Internal: thermal grid cache ----------
+
+@dataclass
+class ThermalGridCache:
+    """Pre-sampled ~1 km regular grid thermal forecast over the default Switzerland bbox.
+
+    All arrays are shape (n_frames, N) where N = n_lat × n_lon (row-major).
+    Values are ensemble medians (float32). NaN encodes missing / fill-value data.
+    """
+    model: str               # "icon-ch1" or "icon-ch2"
+    init_time: datetime
+    lats: np.ndarray         # shape (N,)
+    lons: np.ndarray         # shape (N,)
+    n_lat: int
+    n_lon: int
+    lat_max: float
+    lon_min: float
+    step_deg: float
+    valid_times: list[datetime]
+    solar: np.ndarray               # (n_frames, N) W/m² — median
+    solar_min: np.ndarray
+    solar_max: np.ndarray
+    sunshine: np.ndarray            # (n_frames, N) min/h — median
+    sunshine_min: np.ndarray
+    sunshine_max: np.ndarray
+    cloud_cover: np.ndarray         # (n_frames, N) % — median
+    cloud_cover_min: np.ndarray
+    cloud_cover_max: np.ndarray
+    cloud_low: np.ndarray           # (n_frames, N) % — median
+    cloud_low_min: np.ndarray
+    cloud_low_max: np.ndarray
+    cloud_mid: np.ndarray           # (n_frames, N) % — median
+    cloud_mid_min: np.ndarray
+    cloud_mid_max: np.ndarray
+    cloud_high: np.ndarray          # (n_frames, N) % — median
+    cloud_high_min: np.ndarray
+    cloud_high_max: np.ndarray
+    freezing_level: np.ndarray      # (n_frames, N) m ASL — median
+    freezing_level_min: np.ndarray
+    freezing_level_max: np.ndarray
+    cape: np.ndarray                # (n_frames, N) J/kg — median
+    cape_min: np.ndarray
+    cape_max: np.ndarray
+    cin: np.ndarray                 # (n_frames, N) J/kg (NaN where ICON fill) — median
+    cin_min: np.ndarray
+    cin_max: np.ndarray
+    lcl: np.ndarray                 # (n_frames, N) m — median
+    lcl_min: np.ndarray
+    lcl_max: np.ndarray
+    lfc: np.ndarray                 # (n_frames, N) m — median
+    lfc_min: np.ndarray
+    lfc_max: np.ndarray
+    tke: np.ndarray                 # (n_frames, N) J/kg — median
+    tke_min: np.ndarray
+    tke_max: np.ndarray
+
+
 # ---------- Internal: grid wind cache (not persisted) ----------
 
 @dataclass

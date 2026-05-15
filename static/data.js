@@ -125,6 +125,53 @@ document.getElementById("level-select").addEventListener("change", () => {
   document.getElementById("wind-result").style.display = "none";
 });
 
+// ── Thermal Forecast Grid ─────────────────────────────────────────────────────
+
+async function loadThermalForecast() {
+  const strideKm = document.getElementById("thermal-stride-select").value;
+  console.log(`[App:data] loading thermal grid forecast for stride_km=${strideKm}`);
+  clearThermalError();
+  setThermalLoading(true);
+  const url = `/api/forecast/thermal-grid?stride_km=${strideKm}`;
+  const t0 = performance.now();
+  try {
+    const res = await fetch(url);
+    const elapsed = (performance.now() - t0).toFixed(0);
+    const json = await res.json();
+    console.log(`[App:data] thermal grid received status=${res.status} in ${elapsed} ms`);
+    const pretty = JSON.stringify(json, null, 2);
+    document.getElementById("thermal-json").textContent = pretty;
+    document.getElementById("thermal-status").textContent =
+      `HTTP ${res.status} · ${(pretty.length / 1024).toFixed(1)} KB · ${elapsed} ms · ${url}`;
+    document.getElementById("thermal-result").style.display = "";
+  } catch (err) {
+    console.error("[App:data] thermal grid fetch failed", err);
+    showThermalError(`Fetch failed: ${err.message}`);
+  } finally {
+    setThermalLoading(false);
+  }
+}
+
+function showThermalError(msg) {
+  const el = document.getElementById("thermal-error");
+  el.textContent = msg;
+  el.style.display = "";
+}
+
+function clearThermalError() {
+  document.getElementById("thermal-error").style.display = "none";
+}
+
+function setThermalLoading(on) {
+  document.getElementById("thermal-loading").style.display = on ? "" : "none";
+  document.getElementById("thermal-load-btn").disabled = on;
+}
+
+document.getElementById("thermal-load-btn").addEventListener("click", loadThermalForecast);
+document.getElementById("thermal-stride-select").addEventListener("change", () => {
+  document.getElementById("thermal-result").style.display = "none";
+});
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", () => {

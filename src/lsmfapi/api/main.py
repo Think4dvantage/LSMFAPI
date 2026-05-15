@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from lsmfapi.api.routers import accuracy, dashboard, forecast
+from lsmfapi.api.routers import dashboard, forecast
 from lsmfapi.database import telemetry
 from lsmfapi.database.cache import cache_stats, load_cache, save_cache
 from lsmfapi.database.db import init_db
@@ -62,7 +62,6 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(TelemetryMiddleware)
 app.include_router(forecast.router)
-app.include_router(accuracy.router)
 app.include_router(dashboard.router)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

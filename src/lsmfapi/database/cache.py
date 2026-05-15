@@ -9,6 +9,7 @@ from lsmfapi.models.forecast import (
     AltitudeWindsResponse,
     GridWindCache,
     StationForecastResponse,
+    ThermalGridCache,
 )
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 CACHE_FILE = Path("/app/data/cache.json")
 GRID_CACHE_FILE_CH1 = Path("/app/data/grid_cache_ch1.npz")
 GRID_CACHE_FILE_CH2 = Path("/app/data/grid_cache_ch2.npz")
+THERMAL_GRID_CACHE_FILE_CH1 = Path("/app/data/thermal_grid_cache_ch1.npz")
+THERMAL_GRID_CACHE_FILE_CH2 = Path("/app/data/thermal_grid_cache_ch2.npz")
 
 _ch1_station_cache: dict[str, StationForecastResponse] = {}
 _ch2_station_cache: dict[str, StationForecastResponse] = {}
@@ -23,6 +26,8 @@ _ch1_altitude_winds_cache: dict[str, AltitudeWindsResponse] = {}
 _ch2_altitude_winds_cache: dict[str, AltitudeWindsResponse] = {}
 _ch1_grid_wind_cache: GridWindCache | None = None
 _ch2_grid_wind_cache: GridWindCache | None = None
+_ch1_thermal_grid_cache: ThermalGridCache | None = None
+_ch2_thermal_grid_cache: ThermalGridCache | None = None
 _last_populated_at: datetime | None = None
 
 
@@ -122,6 +127,46 @@ def set_grid_wind_cache(data: GridWindCache) -> None:
         _ch2_grid_wind_cache = data
 
 
+def _merge_thermal_grid_caches(ch1: ThermalGridCache, ch2: ThermalGridCache) -> ThermalGridCache:
+    """Append CH2 frames strictly after the last CH1 valid_time."""
+    cutoff = ch1.valid_times[-1] if ch1.valid_times else None
+    ch2_idx = [i for i, vt in enumerate(ch2.valid_times) if cutoff is None or vt > cutoff]
+    if not ch2_idx:
+        return ch1
+    idx = np.array(ch2_idx)
+    _BASE = ("solar", "sunshine", "cloud_cover", "cloud_low", "cloud_mid", "cloud_high",
+             "freezing_level", "cape", "cin", "lcl", "lfc", "tke")
+    _fields = _BASE + tuple(f"{f}_min" for f in _BASE) + tuple(f"{f}_max" for f in _BASE)
+    merged_arrays = {
+        f: np.concatenate([getattr(ch1, f), getattr(ch2, f)[idx]], axis=0) for f in _fields
+    }
+    return ThermalGridCache(
+        model="icon-ch1+ch2",
+        init_time=ch1.init_time,
+        lats=ch1.lats, lons=ch1.lons,
+        n_lat=ch1.n_lat, n_lon=ch1.n_lon,
+        lat_max=ch1.lat_max, lon_min=ch1.lon_min,
+        step_deg=ch1.step_deg,
+        valid_times=ch1.valid_times + [ch2.valid_times[i] for i in ch2_idx],
+        **merged_arrays,
+    )
+
+
+def get_thermal_grid_cache() -> ThermalGridCache | None:
+    ch1, ch2 = _ch1_thermal_grid_cache, _ch2_thermal_grid_cache
+    if ch1 is not None and ch2 is not None:
+        return _merge_thermal_grid_caches(ch1, ch2)
+    return ch1 or ch2
+
+
+def set_thermal_grid_cache(data: ThermalGridCache) -> None:
+    global _ch1_thermal_grid_cache, _ch2_thermal_grid_cache
+    if data.model == "icon-ch1":
+        _ch1_thermal_grid_cache = data
+    else:
+        _ch2_thermal_grid_cache = data
+
+
 def save_cache() -> None:
     """Atomically write all caches to disk."""
     try:
@@ -143,6 +188,7 @@ def save_cache() -> None:
         logger.exception("Failed to save station/altitude-winds cache")
 
     _save_grid_cache()
+    _save_thermal_grid_cache()
 
 
 def _save_grid_cache() -> None:
@@ -178,6 +224,84 @@ def _save_grid_cache() -> None:
             )
         except Exception:
             logger.exception("Failed to save grid cache (%s)", gc.model)
+
+
+def _save_thermal_grid_cache() -> None:
+    _BASE = ("solar", "sunshine", "cloud_cover", "cloud_low", "cloud_mid", "cloud_high",
+             "freezing_level", "cape", "cin", "lcl", "lfc", "tke")
+    _THERMAL_FIELDS = _BASE + tuple(f"{f}_min" for f in _BASE) + tuple(f"{f}_max" for f in _BASE)
+    for gc, path in (
+        (_ch1_thermal_grid_cache, THERMAL_GRID_CACHE_FILE_CH1),
+        (_ch2_thermal_grid_cache, THERMAL_GRID_CACHE_FILE_CH2),
+    ):
+        if gc is None:
+            continue
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            meta = np.array([
+                gc.init_time.timestamp(), gc.n_lat, gc.n_lon,
+                gc.lat_max, gc.lon_min, gc.step_deg,
+            ], dtype=np.float64)
+            arrays: dict[str, np.ndarray] = {"lats": gc.lats, "lons": gc.lons}
+            for f in _THERMAL_FIELDS:
+                arrays[f] = getattr(gc, f)
+            tmp = path.with_suffix(".tmp.npz")
+            np.savez_compressed(
+                str(tmp),
+                _meta=meta,
+                _valid_times=np.array([vt.timestamp() for vt in gc.valid_times], dtype=np.float64),
+                **arrays,
+            )
+            tmp.replace(path)
+            logger.info(
+                "Thermal grid cache saved (%s): %d × %d, %d frames → %s (%.1f MB)",
+                gc.model, gc.n_lat, gc.n_lon, len(gc.valid_times),
+                path, path.stat().st_size / 1_048_576,
+            )
+        except Exception:
+            logger.exception("Failed to save thermal grid cache (%s)", gc.model)
+
+
+def _load_thermal_grid_cache() -> None:
+    global _ch1_thermal_grid_cache, _ch2_thermal_grid_cache
+    _BASE = ("solar", "sunshine", "cloud_cover", "cloud_low", "cloud_mid", "cloud_high",
+             "freezing_level", "cape", "cin", "lcl", "lfc", "tke")
+    _THERMAL_FIELDS = _BASE + tuple(f"{f}_min" for f in _BASE) + tuple(f"{f}_max" for f in _BASE)
+    for path, model in (
+        (THERMAL_GRID_CACHE_FILE_CH1, "icon-ch1"),
+        (THERMAL_GRID_CACHE_FILE_CH2, "icon-ch2"),
+    ):
+        if not path.exists():
+            continue
+        try:
+            npz = np.load(str(path), allow_pickle=False)
+            meta = npz["_meta"]
+            init_time = datetime.fromtimestamp(float(meta[0]), tz=timezone.utc)
+            n_lat, n_lon = int(meta[1]), int(meta[2])
+            lat_max, lon_min, step_deg = float(meta[3]), float(meta[4]), float(meta[5])
+            valid_times = [
+                datetime.fromtimestamp(float(ts), tz=timezone.utc)
+                for ts in npz["_valid_times"]
+            ]
+            gc = ThermalGridCache(
+                model=model,
+                init_time=init_time,
+                lats=npz["lats"], lons=npz["lons"],
+                n_lat=n_lat, n_lon=n_lon,
+                lat_max=lat_max, lon_min=lon_min, step_deg=step_deg,
+                valid_times=valid_times,
+                **{f: npz[f] for f in _THERMAL_FIELDS},
+            )
+            if model == "icon-ch1":
+                _ch1_thermal_grid_cache = gc
+            else:
+                _ch2_thermal_grid_cache = gc
+            logger.info(
+                "Thermal grid cache loaded (%s): %d × %d, %d frames from %s",
+                model, n_lat, n_lon, len(valid_times), path,
+            )
+        except Exception:
+            logger.exception("Failed to load thermal grid cache (%s) — will regenerate on next collection", model)
 
 
 def load_cache() -> None:
@@ -217,6 +341,7 @@ def load_cache() -> None:
             logger.exception("Failed to load station/altitude-winds cache — starting fresh")
 
     _load_grid_cache()
+    _load_thermal_grid_cache()
 
 
 def _load_grid_cache() -> None:
@@ -266,6 +391,7 @@ def cache_stats() -> dict:
         "ch1_station_cache_keys": len(_ch1_station_cache),
         "ch2_station_cache_keys": len(_ch2_station_cache),
         "grid_wind_cache": _ch1_grid_wind_cache is not None or _ch2_grid_wind_cache is not None,
+        "thermal_grid_cache": _ch1_thermal_grid_cache is not None or _ch2_thermal_grid_cache is not None,
         "last_populated_at": _last_populated_at.isoformat() if _last_populated_at else None,
     }
 
@@ -330,4 +456,22 @@ def grid_cache_detail() -> dict:
         "levels_m": sorted(merged.ws.keys()),
         "ch1_frames": len(_ch1_grid_wind_cache.valid_times) if _ch1_grid_wind_cache else 0,
         "ch2_frames": len(_ch2_grid_wind_cache.valid_times) if _ch2_grid_wind_cache else 0,
+    }
+
+
+def thermal_grid_cache_detail() -> dict:
+    merged = get_thermal_grid_cache()
+    if merged is None:
+        return {"warm": False}
+    valid_until = merged.valid_times[-1].isoformat() if merged.valid_times else None
+    return {
+        "warm": True,
+        "init_time": merged.init_time.isoformat(),
+        "n_points": merged.n_lat * merged.n_lon,
+        "n_lat": merged.n_lat,
+        "n_lon": merged.n_lon,
+        "forecast_hours": len(merged.valid_times),
+        "valid_until": valid_until,
+        "ch1_frames": len(_ch1_thermal_grid_cache.valid_times) if _ch1_thermal_grid_cache else 0,
+        "ch2_frames": len(_ch2_thermal_grid_cache.valid_times) if _ch2_thermal_grid_cache else 0,
     }
