@@ -1,6 +1,6 @@
 # LSMFAPI — Lenticularis SwissMeteo Forecast API
 
-LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the OpenMeteo dependency in the Lenticularis paragliding weather decision-support app. It downloads raw ensemble model output (ICON-CH1-EPS, ICON-CH2-EPS) directly from the MeteoSwiss open data portal, computes statistically robust forecast summaries (median + absolute min/max across all members and runs), and exposes them to Lenticularis via a REST API. It also provides an internal English-only GUI for forecast accuracy analysis and recipe-based bias correction.
+LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the OpenMeteo dependency in the Lenticularis paragliding weather decision-support app. It downloads raw ensemble model output (ICON-CH1-EPS, ICON-CH2-EPS) directly from the MeteoSwiss open data portal, computes statistically robust forecast summaries (median + absolute min/max across all members and runs), and exposes them to Lenticularis via a REST API. It also serves an internal English-only operational dashboard and a Data Inspector GUI.
 
 ---
 
@@ -36,7 +36,7 @@ All configuration lives in `config.yml` (gitignored). Use `config.yml.example` a
 | `meteoswiss` | `stac_base_url` | MeteoSwiss STAC API base (default: `https://data.geo.admin.ch/api/stac/v1`) |
 | `meteoswiss` | `ch1eps_collection` | ICON-CH1-EPS collection ID |
 | `meteoswiss` | `ch2eps_collection` | ICON-CH2-EPS collection ID |
-| `lenticularis` | `base_url` | Lenticularis API base URL (station list + accuracy GUI) |
+| `lenticularis` | `base_url` | Lenticularis API base URL (station list) |
 
 Never read `os.environ` directly in code — all configuration goes through `get_config()`.
 
@@ -50,14 +50,16 @@ No authentication. All endpoints are open — access is controlled at the networ
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/forecast/station` | Hourly blended station forecast — all variables below, probable + min + max, up to 120 h. Params: `station_id`, `hours` |
+| GET | `/api/forecast/station` | Hourly blended station forecast — surface variables below, probable + min + max, up to 120 h. Params: `station_id`, `hours` |
 | GET | `/api/forecast/altitude-winds` | Hourly pressure-level wind forecast at 9 altitude bands (500–5000 m ASL). Params: `station_id`, `hours` |
-| GET | `/api/forecast/wind-grid` | 171-point Switzerland wind grid at 9 altitude levels (stub — not yet populated). Params: `date`, `level_m` |
+| GET | `/api/forecast/wind-grid` | ~1 km Switzerland wind grid (ws / wd / surface RH) at one altitude level. Params: `level_m`, `bbox`, `stride_km` |
+| GET | `/api/forecast/thermal-grid` | ~1 km thermal/convection grid (solar, sunshine, cloud covers, freezing level, CAPE, CIN, LCL, LFC, TKE). Params: `bbox`, `stride_km` |
 | GET | `/api/stations` | Proxy to Lenticularis station list (CORS-safe) |
-| GET | `/accuracy` | Accuracy analysis GUI (browser) |
-| GET | `/api/meta` | Returns Lenticularis base URL to the GUI |
+| GET | `/data` | Data Inspector GUI — query station, altitude-wind, and thermal-grid endpoints |
 | GET | `/health` | Service health + cache key counts |
 | GET | `/dashboard` | Operational dashboard: live collection status, cache state, error log |
+
+**Grid response limits.** `/wind-grid` and `/thermal-grid` return one value list per point per frame, so a fine `stride_km` over the full domain can be enormous. Requests exceeding 10 million values (`points × frames × fields`) are rejected with `400 response_too_large` — increase `stride_km` or request a smaller `bbox`. Accepted `stride_km`: 1, 2, 5, 10 (default 10). `bbox` is `lat_min,lat_max,lon_min,lon_max` within the ICON-CH1 domain.
 
 ### Recipes (v0.4)
 
@@ -72,39 +74,49 @@ No authentication. All endpoints are open — access is controlled at the networ
 
 ## Forecast Variables
 
-Every variable is returned as `{ probable, min, max }` — median and absolute min/max across all ensemble members and all model runs blended for the forecast window.
+Each variable carries `{ <value>, <value>_min, <value>_max }` — ensemble median and absolute min/max across all members and all model runs blended for the forecast window.
 
-### Surface (per hour, per station)
+### Station surface (per hour) — `/api/forecast/station`
+
+The station response carries surface weather only. Solar, cloud, and convection fields are **not** in the station response — they are served spatially via `/api/forecast/thermal-grid`.
 
 | Field | Unit | Description |
 |---|---|---|
-| `wind_speed` | m/s | 10 m wind speed |
-| `wind_gusts` | m/s | 10 m wind gusts (max in step) |
+| `wind_speed` | km/h | 10 m wind speed |
+| `wind_gust` | km/h | 10 m wind gusts (max in step) |
 | `wind_direction` | degrees | 10 m wind direction (0/360 = N) |
 | `temperature` | °C | 2 m air temperature |
 | `humidity` | % | 2 m relative humidity (computed from TD_2M via Magnus formula) |
 | `pressure_qff` | hPa | Sea-level pressure (QFF reduction) |
-| `precipitation` | mm/h | Total precipitation rate |
-| `solar_direct` | W/m² | Direct shortwave radiation at surface |
-| `solar_diffuse` | W/m² | Diffuse shortwave radiation at surface |
-| `sunshine_minutes` | min/h | Minutes of sunshine in the hour (0–60) |
-| `cloud_cover_total` | % | Total cloud cover |
-| `cloud_cover_low` | % | Low cloud cover |
-| `cloud_cover_mid` | % | Mid-level cloud cover |
-| `cloud_cover_high` | % | High cloud cover |
-| `freezing_level` | m ASL | Height of 0 °C isotherm |
-| `cape` | J/kg | Mixed-layer CAPE — convective energy (0 = stable, >500 = significant) |
-| `cin` | J/kg | Mixed-layer CIN — convective inhibition (negative) |
+| `precipitation` | mm | Precipitation in the hour (de-accumulated) |
 
-### Pressure levels (9 altitude bands: 500 / 800 / 1000 / 1500 / 2000 / 2500 / 3000 / 4000 / 5000 m ASL)
-
-Served via `/api/forecast/altitude-winds`.
+### Altitude winds (9 bands: 500 / 800 / 1000 / 1500 / 2000 / 2500 / 3000 / 4000 / 5000 m ASL) — `/api/forecast/altitude-winds`
 
 | Field | Unit | Description |
 |---|---|---|
-| `wind_speed` | m/s | Horizontal wind speed at altitude |
+| `wind_speed` | km/h | Horizontal wind speed at altitude |
 | `wind_direction` | degrees | Horizontal wind direction at altitude |
 | `vertical_wind` | m/s | Vertical wind speed — positive = updraft, negative = downdraft/sink |
+
+### Thermal / convection grid — `/api/forecast/thermal-grid`
+
+Ensemble median (+ `_min` / `_max`) per grid point per hour, sampled on a ~1 km grid:
+
+| Field | Unit | Description |
+|---|---|---|
+| `solar` | W/m² | Total incoming solar (direct + diffuse, de-accumulated) |
+| `sunshine` | min/h | Minutes of sunshine in the hour |
+| `cloud_cover` / `cloud_low` / `cloud_mid` / `cloud_high` | % | Total / low / mid / high cloud cover |
+| `freezing_level` | m ASL | Height of 0 °C isotherm |
+| `cape` | J/kg | Mixed-layer CAPE — convective energy (0 = stable, >500 = significant) |
+| `cin` | J/kg | Mixed-layer CIN — convective inhibition (null = ICON fill value) |
+| `lcl` | m | Lifted condensation level (cloud-base proxy) |
+| `lfc` | m | Level of free convection |
+| `tke` | J/kg | Turbulent kinetic energy (boundary-layer turbulence) |
+
+### Wind grid — `/api/forecast/wind-grid`
+
+Ensemble-median `ws` (km/h) + `wd` (degrees) at one requested altitude level, plus surface `rh` (%), sampled on the same ~1 km grid.
 
 ---
 
@@ -141,18 +153,15 @@ MeteoSwiss STAC API → GRIB2 files (one per variable per step)
   → De-accumulate precipitation, radiation, sunshine
   → Compute RH from TD_2M (dew point) + T_2M via Magnus formula
   → Ensemble engine: median, min, max across all members × runs
-  → Precompute ForecastResponse for every known station
-  → Store in separate CH1/CH2 in-memory dicts (keyed by station_id)
-  → save_cache(): persist to /app/data/cache.json
+  → Precompute station forecast + altitude winds for every known station
+  → Sample wind-grid + thermal-grid onto a ~1 km grid (float16)
+  → Store: separate CH1/CH2 station+altitude dicts; one combined 121-frame grid store
+  → save_cache(): persist to /app/data/cache.json + grid_cache.npz + thermal_grid_cache.npz
 
 API routes
-  → Dict lookup — no on-the-fly computation
+  → Dict lookup / contiguous grid view — no on-the-fly computation
   → Apply active Recipe corrections if any (v0.4)
   → Return JSON to Lenticularis
-
-Accuracy GUI (browser)
-  → Fetches actuals + historical forecasts from Lenticularis directly
-  → Renders bias charts + RMSE summary table
 ```
 
 ### Repository layout
@@ -165,28 +174,27 @@ src/lsmfapi/
 ├── api/
 │   ├── main.py              # FastAPI app factory + lifespan
 │   └── routers/
-│       ├── forecast.py      # GET /api/forecast/station + altitude-winds + wind-grid
-│       └── accuracy.py      # GET /accuracy (GUI) + /api/meta + /api/stations proxy
+│       ├── forecast.py      # GET /api/forecast/station + altitude-winds + wind-grid + thermal-grid
+│       └── dashboard.py     # GET /dashboard + /api/dashboard + /data (Data Inspector) + /api/stations proxy
 ├── collectors/
 │   ├── base.py              # Abstract base + async download helper
 │   ├── grib_cache.py        # grib_run_dir() context manager; persistent GRIB files in /tmp
 │   ├── icon_ch1_eps.py      # ICON-CH1-EPS ingestor (h0–h33, 1h steps, ~10 members)
 │   └── icon_ch2_eps.py      # ICON-CH2-EPS ingestor (h34–h120, 1h steps, ~21 members)
 ├── database/
-│   ├── cache.py             # In-memory forecast cache (get/set station + altitude winds + grid)
+│   ├── cache.py             # In-memory cache: station + altitude dicts + combined float16 grid store
 │   ├── collection_state.py  # Runtime collection state (status, files_done, files_ok)
 │   ├── telemetry.py         # HTTP + download error log (last 20 errors → dashboard)
 │   ├── db.py                # init_db(), get_db(), _run_column_migrations()
 │   └── models.py            # SQLAlchemy ORM (Recipe, RecipeRule — v0.4)
 ├── models/
-│   └── forecast.py          # Pydantic schemas: ForecastResponse, AltitudeWindsResponse
+│   └── forecast.py          # Pydantic + dataclass schemas incl. GridWindCache / ThermalGridCache
 └── services/
     └── ensemble.py          # Median + circular median + absolute min/max
 static/
 ├── shared.css               # Dark theme
-├── dashboard.html           # Operational dashboard
-├── dashboard.js             # Dashboard frontend: collection status, cache state, error log
-├── index.html + index.js    # Accuracy analysis GUI
+├── dashboard.html + dashboard.js   # Operational dashboard
+├── data.html + data.js      # Data Inspector (station / altitude-wind / thermal-grid)
 ```
 
 ### In-memory cache
@@ -196,6 +204,16 @@ Forecast data is held in Python in-process dicts — there is no time-series dat
 The cache is populated on container startup and refreshed after every collection run. API calls are pure dict lookups + in-memory merge with no on-the-fly computation. The cache is persisted to `/app/data/cache.json` after each run and restored on restart, so the API serves data immediately while the background warm-up runs.
 
 All cache access goes through `database/cache.py` getter/setter functions so the backing store can be swapped to Redis later without touching router code.
+
+### Grid cache — combined store, float16
+
+The wind grid and thermal grid are pre-sampled onto a fixed ~1 km grid over Switzerland (~234 × 523 ≈ 122 k points) across the full 121-frame horizon axis (h0–h120). To keep RAM bounded:
+
+- **One combined store per grid** (not separate CH1/CH2 caches). Each collector writes its own contiguous horizon slice **in place** — CH1 → rows 0–33, CH2 → rows 34–120 — and reads return a contiguous numpy **view** (zero copy). No `concatenate` merge on the request path.
+- **float16 field arrays.** Grid values are ensemble medians for map rendering; float16 has far finer resolution than the data's real accuracy and halves resident grid memory (`lats`/`lons` stay float32).
+- Persisted as single `grid_cache.npz` / `thermal_grid_cache.npz`; legacy per-model files are removed on load.
+
+Together with the grid response cap, this keeps peak service RAM around ~2 GB (previously it could spike past 8 GB and OOM).
 
 ### GRIB file persistence
 
@@ -286,6 +304,25 @@ CH1 runs 2 hours after each 00/06/12/18Z model release; CH2 runs 3 hours after. 
 - **Silent STAC miss now warns**: `_fetch_step` logs WARNING when STAC returns no features
 - Removed `HBAS_CON` + `HPBL` from surface collection (not in EPS catalog; was wasting 68 STAC calls/run)
 - Integration test: `tests/test_e2e_collection.py` (`pytest -m integration`)
+
+### v0.3.1 — Production fixes ✅ Shipped
+
+- CI eccodes fix (conda-forge eccodes 2.38 via Miniforge; apt ships incompatible 2.34)
+- Traefik label isolation (PRD/DEV no longer cross-route)
+- Scheduler warm-up/cron race fixed with per-model `asyncio.Lock`
+
+### v0.3.2 — Thermal forecast grid ✅ Shipped
+
+- `GET /api/forecast/thermal-grid` — solar, sunshine, cloud covers, freezing level, CAPE, CIN, LCL, LFC, TKE on a ~1 km grid; `LCL_ML`/`LFC_ML`/`TKE` added to `SURFACE_VARS`
+- `ThermalGridCache` with `.npz` persistence; dashboard + Data Inspector cards
+- Accuracy GUI removed; `accuracy.py` merged into `dashboard.py` (`/data` + `/api/stations`)
+
+### v0.3.3 — Grid memory reduction ✅ Shipped
+
+- **float16 grid storage** — halves resident grid memory (~3.3 GB → ~1.6 GB)
+- **Combined single-array grid store** — collectors write horizon slices in place; reads are contiguous views (no per-request merge copy)
+- **Grid response budget cap** (10 M values) + plain-dict response build — blocks fine-`stride_km` full-bbox requests that could allocate 10+ GB of Python floats
+- Net: peak RAM ~8–16 GB (OOM at 8 GB) → ~2 GB, with faster reads
 
 ### v0.4 — Recipes
 

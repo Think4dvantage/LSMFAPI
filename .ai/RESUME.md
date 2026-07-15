@@ -1,3 +1,59 @@
+# Resume Notes — 2026-07-15
+
+## What Was Done This Session
+
+### v0.3.3 — Grid Memory Reduction (peak RAM ~8–16 GB → ~2 GB)
+
+The service was OOMing at 8 GB. Root causes traced to: (1) the `/thermal-grid` response
+builder materialising hundreds of millions of Python floats at fine `stride_km`; (2) a full
+`np.concatenate` merge copy of the combined grid on every request; (3) float32 resident grids
+(~3.3 GB). Three fixes, all shipped and verified:
+
+**1. Response budget guard — `api/routers/forecast.py`**
+- Added `_MAX_RESPONSE_CELLS = 10_000_000` and `_budget_error()`. `/grid` and `/thermal-grid`
+  reject requests where `n_pts × n_frames × n_fields` exceeds the cap with `400
+  response_too_large` (logged WARNING) **before** allocating. Default `stride_km=10` full-bbox
+  thermal request (~5.3 M) passes; `stride_km=1` full-bbox (~530 M) is blocked.
+- Grid responses now built as plain dicts → `JSONResponse` (no intermediate `GridFrame`/
+  `ThermalGridFrame`/`*Response` Pydantic models — those imports were removed from the router).
+  `_to_nullable` uses one vectorised `np.round(...).tolist()`.
+
+**2. float16 grid storage — `collectors/icon_ch1_eps.py`, `models/forecast.py`**
+- `_build_thermal_grid_cache()` and `_build_grid_wind_cache()` allocate field arrays as
+  `float16` and cast stats to float16 on store (computation stays float64). `lats`/`lons`
+  stay float32. Resident grids ~3.3 GB → ~1.6 GB.
+
+**3. Combined single-array grid store — `database/cache.py` (rewritten)**
+- Replaced `_ch1_/_ch2_grid_wind_cache` + `_ch2_/_ch1_thermal_grid_cache` and the
+  `_merge_*` functions with ONE combined 121-frame store per grid (`_grid_wind_cache`,
+  `_thermal_grid_cache`) plus `_grid_wind_model_init` / `_thermal_grid_model_init` maps.
+- `set_*` writes each model's horizon slice in place (CH1 rows 0–33, CH2 rows 34–120), keyed
+  by `horizon = round((valid_time − init_time)/1h)`. `get_*` returns a contiguous numpy
+  **view** (`arr[start:end]`, zero copy) — no merge, no per-request copy.
+- Persistence collapsed to single `grid_cache.npz` / `thermal_grid_cache.npz` (all 121
+  frames, `valid_times` as timestamps with NaN for unpopulated, per-model init in `_meta`).
+  Legacy `*_ch1/*_ch2` npz files removed on load. Public API (get/set/save/load/detail)
+  unchanged, so collectors, router, and dashboard were untouched by this part.
+- `grid_cache_detail()` / `thermal_grid_cache_detail()` keep `ch1_frames`/`ch2_frames` by
+  counting populated rows in the [0,34) / [34,121) ranges.
+
+**Verification**: standalone functional test (combined store both/partial, boundary
+continuity, save→wipe→load round-trip, detail counts, float16 dtype, view-not-copy, budget
+helper, NaN handling) passed; all changed files byte-compile.
+
+**Behavior change to note**: `/thermal-grid` at `stride_km ≤ 5` over the *full* domain now
+returns `400 response_too_large` (must use a smaller bbox). Tune `_MAX_RESPONSE_CELLS` if the
+Data Inspector needs those combinations.
+
+### Docs / release
+- `pyproject.toml` 0.3.0 → **0.3.3**.
+- Updated `.ai/context/architecture.md`, `features.md`, `01-project-overview.md`, and
+  `README.md`. Corrected long-standing README drift: station wind is **km/h** (not m/s), the
+  station response only carries wind/temp/humidity/pressure/precip (solar/cloud/CAPE live in
+  the thermal-grid, not the station response), accuracy GUI removed, wind-grid is populated.
+
+---
+
 # Resume Notes — 2026-05-15
 
 ## What Was Done This Session

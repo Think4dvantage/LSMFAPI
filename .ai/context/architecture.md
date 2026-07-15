@@ -27,15 +27,44 @@ This means a CH1 re-run only refreshes the CH1 dict; the CH2 tail remains intact
 - API calls are pure dict lookups + in-memory merge, no on-the-fly computation.
 - Station list is fetched from the Lenticularis API on startup and refreshed before each collection run.
 
-### Wind grid cache
+### Wind & thermal grid caches — combined single-array store
+
+Both gridded products (wind grid, thermal grid) are pre-sampled onto a fixed ~1 km
+regular lat/lon grid over the default Switzerland bbox (`n_lat ≈ 234 × n_lon ≈ 523 ≈
+122 k points`). The full forecast axis is horizons 0–120 (**121 frames**).
 
 ```python
-_grid_cache: dict[str, GridResponse] = {}
-# key: "{YYYY-MM-DD}_{level_m}"  e.g. "2024-06-01_2000"
+# database/cache.py — ONE combined store per grid, sized to the full 121-frame axis
+_grid_wind_cache: GridWindCache | None = None      # rows 0–33 (CH1) + 34–120 (CH2)
+_thermal_grid_cache: ThermalGridCache | None = None
+_grid_wind_model_init: dict[str, datetime] = {}    # model → last-write init_time
+_thermal_grid_model_init: dict[str, datetime] = {}
 ```
 
-- Same lifecycle as station cache
-- 171 grid points × 9 altitude levels
+- **No merge-on-read, no per-request copy.** Each collector writes its own disjoint,
+  contiguous horizon slice **in place** (`set_*`): CH1 → rows 0–33, CH2 → rows 34–120,
+  keyed by `horizon = round((valid_time − init_time)/1h)`. `get_*` returns a **contiguous
+  numpy view** (`arr[start:end]`, zero copy) of the populated range. Because the two
+  slices are always contiguous, the view never needs a gap-filling copy.
+- **float16 storage.** All field arrays (thermal: 12 fields × median/min/max = 36 arrays;
+  wind: 9×ws + 9×wd + rh = 19 arrays) are `float16`. Stats are computed in float64 and cast
+  to float16 only on store. Halves resident grid memory (~3.3 GB → ~1.6 GB) with far finer
+  resolution than the data's real accuracy; every field's range sits inside float16's
+  ±65504. `lats`/`lons` stay float32.
+- `GridWindCache` / `ThermalGridCache` are `@dataclass` (not Pydantic) holding numpy arrays,
+  shape `(n_frames, N)` per field. The same dataclass type is reused for the combined store
+  and for the view returned by `get_*`.
+- A CH1 re-run refreshes only rows 0–33; the CH2 tail is untouched, and vice versa.
+
+### Grid response budget
+
+`get_*` returns arrays for the whole grid, but the `/grid` and `/thermal-grid` routers cap
+each response at `_MAX_RESPONSE_CELLS = 10_000_000` (`points × frames × fields`). A fine
+`stride_km` over the full domain would otherwise materialise hundreds of millions of Python
+floats and OOM the container; oversized requests get `400 response_too_large` (logged at
+WARNING) telling the caller to increase `stride_km` or shrink the bbox. The default
+`stride_km=10` full-bbox request stays well under the cap. Grid responses are built as plain
+dicts → `JSONResponse` (no intermediate Pydantic frame models) to avoid doubling the peak.
 
 ### Altitude winds cache
 
@@ -58,12 +87,15 @@ def set_station_forecast(station_key: str, data: StationForecastResponse) -> Non
 def get_station_altitude_winds(station_key: str) -> AltitudeWindsResponse | None: ...
 def set_station_altitude_winds(station_key: str, data: AltitudeWindsResponse) -> None: ...
 def get_grid_wind_cache() -> GridWindCache | None: ...
+    # Returns a contiguous view of the combined 121-frame store (zero copy)
 def set_grid_wind_cache(data: GridWindCache) -> None: ...
+    # Writes the model's horizon slice into the combined store in place
 def get_thermal_grid_cache() -> ThermalGridCache | None: ...
 def set_thermal_grid_cache(data: ThermalGridCache) -> None: ...
-    # Merges CH1 (h0–h33) and CH2 (h34–h120) into one ThermalGridCache, same pattern as wind grid
-def save_cache() -> None: ...   # atomic write to /app/data/cache.json (+ thermal .npz)
-def load_cache() -> None: ...   # restore all caches from /app/data/cache.json on startup
+    # Same combined-store pattern: in-place slice write, contiguous view read
+def save_cache() -> None: ...   # cache.json (+ grid_cache.npz + thermal_grid_cache.npz)
+def load_cache() -> None: ...   # restore all caches from /app/data on startup;
+                                # removes legacy per-model *_ch1/*_ch2 npz files
 def cache_stats() -> dict: ...  # keys count, last_populated_at — for health/debug
 ```
 
@@ -75,8 +107,16 @@ All reads and writes go through these functions so the backing store can be swap
 On container startup, `load_cache()` restores all caches before the scheduler fires —
 the API serves stale-but-valid data immediately while the background warm-up runs.
 
-JSON keys: `ch1_station`, `ch2_station`, `ch1_altitude_winds`, `ch2_altitude_winds`.
-CH1 and CH2 are saved and loaded independently; a new deploy never loses the CH2 tail just because CH1 hasn't run yet.
+Station/altitude data is stored in `cache.json` under keys `ch1_station`, `ch2_station`,
+`ch1_altitude_winds`, `ch2_altitude_winds`. CH1 and CH2 are saved and loaded independently;
+a new deploy never loses the CH2 tail just because CH1 hasn't run yet.
+
+The two grids are persisted as single compressed `.npz` files — `/app/data/grid_cache.npz`
+and `/app/data/thermal_grid_cache.npz` — each holding the full combined 121-frame store
+(float16 arrays, per-frame `valid_times` as timestamps with NaN for unpopulated frames, and
+per-model init timestamps in `_meta`). Legacy per-model files (`grid_cache_ch1.npz`,
+`grid_cache_ch2.npz`, `thermal_grid_cache_ch1.npz`, `thermal_grid_cache_ch2.npz`) are removed
+on load. Old files that fail to load are ignored — the grid regenerates on the next run.
 
 Volume mount: `./data:/app/data` (in both compose files). The `./data` directory is excluded
 from the rsync deploy so the remote cache is never overwritten by a deploy.
@@ -322,8 +362,9 @@ No authentication. All endpoints are open — access is controlled at the networ
 ### Forecast
 - `GET /api/forecast/station` — `?station_id=&hours=` → hourly ForecastResponse (probable + min + max per variable, 120h max); served from in-memory cache. Does NOT include pressure-level winds.
 - `GET /api/forecast/altitude-winds` — `?station_id=&hours=` → AltitudeWindsResponse; per-hour wind speed, direction, vertical wind at 9 altitude bands (500–5000m ASL); served from in-memory cache
-- `GET /api/forecast/wind-grid` — `?bbox=lat_min,lat_max,lon_min,lon_max&stride_km=` → GridForecastResponse; ensemble-median wind speed + direction at 9 altitude bands on a regular ~1 km spatial grid over Switzerland
-- `GET /api/forecast/thermal-grid` — `?bbox=lat_min,lat_max,lon_min,lon_max&stride_km=` → ThermalGridResponse; ensemble-median thermal/convection fields (solar radiation, sunshine, cloud covers, freezing level, CAPE, CIN, LCL, LFC, TKE) on the same ~1 km regular grid; stride_km default 10, accepted: 1,2,5,10
+- `GET /api/forecast/wind-grid` — `?level_m=&bbox=lat_min,lat_max,lon_min,lon_max&stride_km=` → ensemble-median wind speed + direction + surface RH on a regular ~1 km spatial grid over Switzerland (one altitude level per request). Served from the combined grid store. Response capped at 10 M cells → `400 response_too_large` if `stride_km`/bbox too large.
+- `GET /api/forecast/thermal-grid` — `?bbox=lat_min,lat_max,lon_min,lon_max&stride_km=` → ensemble-median thermal/convection fields (solar radiation, sunshine, cloud covers, freezing level, CAPE, CIN, LCL, LFC, TKE) on the same ~1 km regular grid; stride_km default 10, accepted: 1,2,5,10. Same 10 M-cell response cap.
+- Both grid responses are plain JSON `{init_time, model, stride_km, grid:[{lat,lon}], frames:[{valid_time, <field>:[...]}]}` (built without intermediate Pydantic frame models to keep the response-build memory low).
 
 ### Data Inspector + proxy
 - `GET /data` — serves `static/data.html` (Data Inspector GUI — query station, altitude-wind, and thermal-grid endpoints)

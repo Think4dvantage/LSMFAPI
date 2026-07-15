@@ -168,7 +168,7 @@ class ThermalGridCache:
     """Pre-sampled ~1 km regular grid thermal forecast over the default Switzerland bbox.
 
     All arrays are shape (n_frames, N) where N = n_lat × n_lon (row-major).
-    Values are ensemble medians (float32). NaN encodes missing / fill-value data.
+    Values are ensemble medians (float16). NaN encodes missing / fill-value data.
     """
     model: str               # "icon-ch1" or "icon-ch2"
     init_time: datetime

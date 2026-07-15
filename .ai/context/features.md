@@ -1,6 +1,6 @@
 # Feature History & Backlog
 
-## Current Version: v0.3.2 (in progress)
+## Current Version: v0.3.3
 
 ### Shipped Milestones
 
@@ -10,7 +10,8 @@
 | v0.2 | Dashboard, Data Inspector, GitHub Actions Docker pipeline, CH1/CH2 cache merge |
 | v0.3 | Hourly CH2 tail (h34–120), 4×/day schedule, NULL fix (dynamic N_MEMBERS), GRIB persistence cache, dashboard ok/failed counts, error recording, HBAS_CON/HPBL removed |
 | v0.3.1 | CI eccodes fix, Traefik label isolation (PRD/DEV), scheduler lock (warm-up/cron race) |
-| v0.3.2 | Thermal grid endpoint: `GET /api/forecast/thermal-grid` — LCL_ML, LFC_ML, TKE added to SURFACE_VARS; `_build_thermal_grid_cache()` in CH1 + CH2; `ThermalGridCache` with npz persistence |
+| v0.3.2 | Thermal grid endpoint: `GET /api/forecast/thermal-grid` — LCL_ML, LFC_ML, TKE added to SURFACE_VARS; `_build_thermal_grid_cache()` in CH1 + CH2; `ThermalGridCache` with npz persistence; accuracy GUI removed, `accuracy.py` merged into `dashboard.py` |
+| v0.3.3 | Grid memory reduction: float16 grid storage, combined single-array grid store (no merge-on-read copy), `/grid` + `/thermal-grid` response budget cap. Peak RAM ~8–16 GB → ~2 GB |
 
 ---
 
@@ -58,7 +59,7 @@
 
 ---
 
-## v0.3.2 — Thermal Forecast Grid (in progress)
+## v0.3.2 — Thermal Forecast Grid ✓ SHIPPED
 
 - Added `LCL_ML`, `LFC_ML`, `TKE` to `SURFACE_VARS` (shared by CH1 + CH2)
 - New `_build_thermal_grid_cache()` function in `icon_ch1_eps.py` (imported by CH2):
@@ -73,6 +74,28 @@
 - `accuracy.py` router merged into `dashboard.py`: `/api/stations` proxy + `/data` page moved; `/api/meta` endpoint removed
 - Dashboard thermal grid cache card added (warm/cold, n_points, CH1/CH2 frames)
 - Data Inspector updated with Thermal Forecast Grid section
+
+---
+
+## v0.3.3 — Grid Memory Reduction ✓ SHIPPED
+
+Cut the service's peak RAM from ~8–16 GB (was OOMing at 8 GB) to ~2 GB without sacrificing
+performance. Three independent changes:
+
+- **float16 grid storage** — all wind/thermal grid field arrays are now `float16` (stats
+  computed in float64, cast only on store). Resident grid memory ~3.3 GB → ~1.6 GB; `lats`/
+  `lons` kept float32. Every field's range fits inside float16's ±65504.
+- **Combined single-array grid store** (`database/cache.py`) — replaced the separate
+  `_ch1_/_ch2_` grid caches + per-request `np.concatenate` merge with one combined 121-frame
+  store. Each collector writes its horizon slice in place (CH1 rows 0–33, CH2 rows 34–120);
+  `get_*` returns a contiguous numpy **view** (zero copy). Removes the ~1 GB-per-request merge
+  allocation and recompute. Persistence collapsed to single `grid_cache.npz` /
+  `thermal_grid_cache.npz`; legacy per-model files auto-removed on load.
+- **Response budget cap** — `/grid` and `/thermal-grid` reject requests exceeding
+  `_MAX_RESPONSE_CELLS = 10_000_000` (points × frames × fields) with `400 response_too_large`
+  before allocating, and build responses as plain dicts (no intermediate Pydantic frame
+  models). Blocks the fine-`stride_km` full-bbox request that could allocate 10+ GB of Python
+  floats. Default `stride_km=10` full-bbox request is unaffected.
 
 ---
 
@@ -92,7 +115,6 @@
 - Local LLM integration (Ollama): accuracy + bias stats → natural-language analysis + Recipe suggestions
 - Push notifications when new forecast run is ingested
 - Configurable percentile bands (p10/p90) as alternative to absolute min/max
-- Wind-grid endpoint fully populated (currently a stub)
 
 ---
 

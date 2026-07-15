@@ -1,3 +1,4 @@
+import logging
 import math
 
 import numpy as np
@@ -10,7 +11,6 @@ from lsmfapi.collectors.icon_ch1_eps import (
     GRID_LAT_MIN,
     GRID_LON_MAX,
     GRID_LON_MIN,
-    GRID_STEP_DEG,
 )
 from lsmfapi.database.cache import (
     cache_is_warm,
@@ -22,13 +22,10 @@ from lsmfapi.database.cache import (
 )
 from lsmfapi.models.forecast import (
     AltitudeWindsResponse,
-    GridForecastResponse,
-    GridFrame,
-    GridPoint,
     StationForecastResponse,
-    ThermalGridFrame,
-    ThermalGridResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/forecast", tags=["forecast"])
 
@@ -40,11 +37,38 @@ _VALID_STRIDE_KM: frozenset[int] = frozenset({1, 2, 5, 10})
 _DOMAIN_LAT_MIN, _DOMAIN_LAT_MAX = 43.0, 50.0
 _DOMAIN_LON_MIN, _DOMAIN_LON_MAX = 3.0, 17.0
 
+# Cap on total emitted values (points × frames × fields) per grid request. A fine
+# stride over the full domain would otherwise materialise hundreds of millions of
+# Python floats and OOM the container. The default stride_km=10 full-bbox thermal
+# request (~1.2k pts × 121 frames × 36 fields ≈ 5.3M) stays comfortably under this.
+_MAX_RESPONSE_CELLS = 10_000_000
+
 _DEFAULT_BBOX = f"{GRID_LAT_MIN},{GRID_LAT_MAX},{GRID_LON_MIN},{GRID_LON_MAX}"
 
 
 def _err(code: str, message: str, status: int) -> JSONResponse:
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+
+
+def _budget_error(endpoint: str, n_pts: int, n_frames: int, n_fields: int) -> JSONResponse | None:
+    cells = n_pts * n_frames * n_fields
+    if cells <= _MAX_RESPONSE_CELLS:
+        return None
+    logger.warning(
+        "%s response rejected: %d pts × %d frames × %d fields = %d values > cap %d",
+        endpoint, n_pts, n_frames, n_fields, cells, _MAX_RESPONSE_CELLS,
+    )
+    return _err(
+        "response_too_large",
+        f"Requested grid response is too large ({cells:,} values, cap {_MAX_RESPONSE_CELLS:,}). "
+        "Increase stride_km or request a smaller bbox.",
+        400,
+    )
+
+
+def _to_nullable(row: np.ndarray) -> list[float | None]:
+    vals = np.round(row.astype(np.float64), 1).tolist()
+    return [None if math.isnan(v) else v for v in vals]
 
 
 @router.get("/station", response_model=StationForecastResponse)
@@ -161,47 +185,45 @@ async def wind_grid(
     # Map each requested point to the nearest pre-sampled 1 km cache cell
     ws_arr = grid_cache.ws[level_m]  # (n_frames, N)
     wd_arr = grid_cache.wd[level_m]  # (n_frames, N)
+    rh_arr = grid_cache.rh           # (n_frames, N)
     n_frames = ws_arr.shape[0]
-    n_cache_lat = grid_cache.n_lat
-    n_cache_lon = grid_cache.n_lon
+
+    budget_err = _budget_error("wind-grid", n_pts, n_frames, 3)
+    if budget_err is not None:
+        return budget_err
 
     lat_indices = np.clip(
         np.round((grid_cache.lat_max - flat_req_lats) / grid_cache.step_deg).astype(int),
-        0, n_cache_lat - 1,
+        0, grid_cache.n_lat - 1,
     )
     lon_indices = np.clip(
         np.round((flat_req_lons - grid_cache.lon_min) / grid_cache.step_deg).astype(int),
-        0, n_cache_lon - 1,
+        0, grid_cache.n_lon - 1,
     )
-    flat_cache_indices = lat_indices * n_cache_lon + lon_indices
+    flat_cache_indices = lat_indices * grid_cache.n_lon + lon_indices
 
     grid_points = [
-        GridPoint(lat=round(float(flat_req_lats[i]), 5), lon=round(float(flat_req_lons[i]), 5))
+        {"lat": round(float(flat_req_lats[i]), 5), "lon": round(float(flat_req_lons[i]), 5)}
         for i in range(n_pts)
     ]
 
-    rh_arr = grid_cache.rh  # (n_frames, N)
+    frames = [
+        {
+            "valid_time": valid_time.isoformat(),
+            "ws": _to_nullable(ws_arr[f_idx, flat_cache_indices]),
+            "wd": _to_nullable(wd_arr[f_idx, flat_cache_indices]),
+            "rh": _to_nullable(rh_arr[f_idx, flat_cache_indices]),
+        }
+        for f_idx, valid_time in enumerate(grid_cache.valid_times)
+    ]
 
-    def _to_nullable(row: np.ndarray) -> list[float | None]:
-        return [None if math.isnan(float(v)) else round(float(v), 1) for v in row]
-
-    frames = []
-    for f_idx, valid_time in enumerate(grid_cache.valid_times):
-        frames.append(GridFrame(
-            valid_time=valid_time,
-            ws=_to_nullable(ws_arr[f_idx, flat_cache_indices]),
-            wd=_to_nullable(wd_arr[f_idx, flat_cache_indices]),
-            rh=_to_nullable(rh_arr[f_idx, flat_cache_indices]),
-        ))
-
-    response = GridForecastResponse(
-        init_time=grid_cache.init_time,
-        model=grid_cache.model,
-        stride_km=stride_km,
-        grid=grid_points,
-        frames=frames,
-    )
-    return JSONResponse(response.model_dump(mode="json"))
+    return JSONResponse({
+        "init_time": grid_cache.init_time.isoformat(),
+        "model": grid_cache.model,
+        "stride_km": stride_km,
+        "grid": grid_points,
+        "frames": frames,
+    })
 
 
 @router.get("/thermal-grid")
@@ -251,6 +273,15 @@ async def thermal_grid(
     flat_req_lons = lon_grid.ravel()
     n_pts = len(flat_req_lats)
 
+    _BASE = ("solar", "sunshine", "cloud_cover", "cloud_low", "cloud_mid", "cloud_high",
+             "freezing_level", "cape", "cin", "lcl", "lfc", "tke")
+    _fields = _BASE + tuple(f"{f}_min" for f in _BASE) + tuple(f"{f}_max" for f in _BASE)
+
+    n_frames = len(thermal_cache.valid_times)
+    budget_err = _budget_error("thermal-grid", n_pts, n_frames, len(_fields))
+    if budget_err is not None:
+        return budget_err
+
     # Map each requested point to the nearest pre-sampled 1 km cache cell
     lat_indices = np.clip(
         np.round((thermal_cache.lat_max - flat_req_lats) / thermal_cache.step_deg).astype(int),
@@ -263,30 +294,21 @@ async def thermal_grid(
     flat_cache_indices = lat_indices * thermal_cache.n_lon + lon_indices
 
     grid_points = [
-        GridPoint(lat=round(float(flat_req_lats[i]), 5), lon=round(float(flat_req_lons[i]), 5))
+        {"lat": round(float(flat_req_lats[i]), 5), "lon": round(float(flat_req_lons[i]), 5)}
         for i in range(n_pts)
     ]
 
-    def _to_nullable(row: np.ndarray) -> list[float | None]:
-        return [None if math.isnan(float(v)) else round(float(v), 1) for v in row]
-
-    _BASE = ("solar", "sunshine", "cloud_cover", "cloud_low", "cloud_mid", "cloud_high",
-             "freezing_level", "cape", "cin", "lcl", "lfc", "tke")
-    _fields = _BASE + tuple(f"{f}_min" for f in _BASE) + tuple(f"{f}_max" for f in _BASE)
-
     frames = []
     for f_idx, valid_time in enumerate(thermal_cache.valid_times):
-        kwargs = {
-            f: _to_nullable(getattr(thermal_cache, f)[f_idx, flat_cache_indices])
-            for f in _fields
-        }
-        frames.append(ThermalGridFrame(valid_time=valid_time, **kwargs))
+        frame = {"valid_time": valid_time.isoformat()}
+        for f in _fields:
+            frame[f] = _to_nullable(getattr(thermal_cache, f)[f_idx, flat_cache_indices])
+        frames.append(frame)
 
-    response = ThermalGridResponse(
-        init_time=thermal_cache.init_time,
-        model=thermal_cache.model,
-        stride_km=stride_km,
-        grid=grid_points,
-        frames=frames,
-    )
-    return JSONResponse(response.model_dump(mode="json"))
+    return JSONResponse({
+        "init_time": thermal_cache.init_time.isoformat(),
+        "model": thermal_cache.model,
+        "stride_km": stride_km,
+        "grid": grid_points,
+        "frames": frames,
+    })

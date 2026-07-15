@@ -396,7 +396,11 @@ def _build_thermal_grid_cache(
     """
     n_grid = len(sample_indices)
     n_horizons = len(horizons)
-    _nan = lambda: np.full((n_horizons, n_grid), np.nan, dtype=np.float32)  # noqa: E731
+    # float16 storage: these are ensemble-median map-viz fields; every field's range
+    # (cloud %, W/m², m, J/kg) sits well inside float16's ±65504 and its ~3 sig figs
+    # exceed the data's real accuracy. Halves resident grid memory. Stats below are
+    # computed in float64 and only cast to float16 on store.
+    _nan = lambda: np.full((n_horizons, n_grid), np.nan, dtype=np.float16)  # noqa: E731
 
     solar_cache        = _nan(); solar_min_cache        = _nan(); solar_max_cache        = _nan()
     sunshine_cache     = _nan(); sunshine_min_cache     = _nan(); sunshine_max_cache     = _nan()
@@ -427,13 +431,13 @@ def _build_thermal_grid_cache(
             return None
 
     def _median(arr: np.ndarray) -> np.ndarray:
-        return np.nanmedian(arr, axis=0).astype(np.float32)
+        return np.nanmedian(arr, axis=0).astype(np.float16)
 
     def _nanmin(arr: np.ndarray) -> np.ndarray:
-        return np.nanmin(arr, axis=0).astype(np.float32)
+        return np.nanmin(arr, axis=0).astype(np.float16)
 
     def _nanmax(arr: np.ndarray) -> np.ndarray:
-        return np.nanmax(arr, axis=0).astype(np.float32)
+        return np.nanmax(arr, axis=0).astype(np.float16)
 
     # Load prior accumulated values for deaccumulation baseline
     prev_aswdir: np.ndarray | None = None
@@ -548,13 +552,16 @@ def _build_grid_wind_cache(
     n_horizons = len(horizons)
     alt_m_order = sorted(ALTITUDE_TO_HPA.keys())
 
+    # float16 storage — ws (km/h), wd (deg), rh (%) all fit float16 with far finer
+    # resolution than the data warrants; halves resident grid memory. Stats are computed
+    # in float64 below and cast to float16 only on store.
     ws_cache: dict[int, np.ndarray] = {
-        alt_m: np.full((n_horizons, n_grid), np.nan, dtype=np.float32) for alt_m in alt_m_order
+        alt_m: np.full((n_horizons, n_grid), np.nan, dtype=np.float16) for alt_m in alt_m_order
     }
     wd_cache: dict[int, np.ndarray] = {
-        alt_m: np.full((n_horizons, n_grid), np.nan, dtype=np.float32) for alt_m in alt_m_order
+        alt_m: np.full((n_horizons, n_grid), np.nan, dtype=np.float16) for alt_m in alt_m_order
     }
-    rh_cache = np.full((n_horizons, n_grid), np.nan, dtype=np.float32)
+    rh_cache = np.full((n_horizons, n_grid), np.nan, dtype=np.float16)
 
     for h_idx, h in enumerate(horizons):
         u_grid: np.ndarray | None = None
@@ -587,11 +594,11 @@ def _build_grid_wind_cache(
                 speeds = np.sqrt(u ** 2 + v ** 2) * 3.6
                 dirs = (270.0 - np.degrees(np.arctan2(v, u))) % 360.0
                 rad = np.deg2rad(dirs)
-                ws_cache[alt_m][h_idx] = np.nanmedian(speeds, axis=0).astype(np.float32)
+                ws_cache[alt_m][h_idx] = np.nanmedian(speeds, axis=0).astype(np.float16)
                 wd_cache[alt_m][h_idx] = (np.degrees(np.arctan2(
                     np.nanmedian(np.sin(rad), axis=0),
                     np.nanmedian(np.cos(rad), axis=0),
-                )) % 360.0).astype(np.float32)
+                )) % 360.0).astype(np.float16)
 
         t_dest  = tmpdir / f"T_2M_{h:03d}.grib2"
         td_dest = tmpdir / f"TD_2M_{h:03d}.grib2"
@@ -616,7 +623,7 @@ def _build_grid_wind_cache(
             rh_members = _compute_rh_from_td(
                 t_arr.astype(np.float64), td_arr.astype(np.float64),
             )
-            rh_cache[h_idx] = np.nanmedian(rh_members, axis=0).astype(np.float32)
+            rh_cache[h_idx] = np.nanmedian(rh_members, axis=0).astype(np.float16)
 
         logger.debug("Grid %s h=%d computed", model, h)
 

@@ -2,7 +2,7 @@
 
 ## What This Is
 
-LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the OpenMeteo dependency in the Lenticularis paragliding weather decision-support app. It downloads raw ensemble model output (ICON-CH1-EPS, ICON-CH2-EPS) directly from the MeteoSwiss open data portal, computes statistically robust forecast summaries (median + absolute min/max across all members and runs), and exposes them to Lenticularis via a REST API. It also provides an internal English-only GUI for forecast accuracy analysis.
+LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the OpenMeteo dependency in the Lenticularis paragliding weather decision-support app. It downloads raw ensemble model output (ICON-CH1-EPS, ICON-CH2-EPS) directly from the MeteoSwiss open data portal, computes statistically robust forecast summaries (median + absolute min/max across all members and runs), and exposes them to Lenticularis via a REST API. It also serves an internal English-only operational dashboard and a Data Inspector GUI.
 
 ---
 
@@ -14,7 +14,7 @@ LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the
 | Web framework | FastAPI |
 | Data validation | Pydantic v2 |
 | Dependency management | Poetry (`pyproject.toml`) |
-| Forecast cache | Python in-process dicts (CH1 + CH2 stored separately, merged at read time) |
+| Forecast cache | Python in-process: station/altitude CH1+CH2 dicts (merged at read time); grids in one combined float16 store (view at read time) |
 | Relational DB | SQLite via SQLAlchemy (no Alembic — raw ALTER TABLE in `_run_column_migrations()`) |
 | Scheduler | APScheduler (cron triggers) |
 | HTTP client | httpx (async) |
@@ -36,16 +36,15 @@ src/lsmfapi/
 ├── api/
 │   ├── main.py              # FastAPI app factory + lifespan
 │   └── routers/
-│       ├── forecast.py      # GET /api/forecast/station + /altitude-winds + /wind-grid
-│       ├── accuracy.py      # GET /accuracy (GUI) + /api/meta + /api/stations proxy
-│       └── dashboard.py     # GET /dashboard + /api/dashboard (collection state + telemetry)
+│       ├── forecast.py      # GET /api/forecast/station + /altitude-winds + /wind-grid + /thermal-grid
+│       └── dashboard.py     # GET /dashboard + /api/dashboard + /data (Data Inspector) + /api/stations proxy
 ├── collectors/
 │   ├── base.py              # Abstract base + async download helper
 │   ├── grib_cache.py        # grib_run_dir() context manager; persistent GRIB dirs in /tmp
 │   ├── icon_ch1_eps.py      # ICON-CH1-EPS ingestor (h0–h33, 1h steps, ~10 members)
 │   └── icon_ch2_eps.py      # ICON-CH2-EPS ingestor (h34–h120, 1h steps, ~21 members)
 ├── database/
-│   ├── cache.py             # In-memory forecast cache (get/set station + altitude winds + grid)
+│   ├── cache.py             # In-memory cache: station + altitude (CH1/CH2 dicts) + combined float16 grid store
 │   ├── collection_state.py  # Runtime collection state (status, files_done, files_ok)
 │   ├── telemetry.py         # HTTP + download error log (last 20 errors → dashboard)
 │   ├── db.py                # init_db(), get_db(), _run_column_migrations()
@@ -57,7 +56,7 @@ src/lsmfapi/
 static/
 ├── shared.css               # Dark theme
 ├── dashboard.html + dashboard.js   # Operational dashboard
-├── index.html + index.js    # Accuracy analysis GUI
+├── data.html + data.js      # Data Inspector (query station / altitude-wind / thermal-grid)
 ```
 
 ---
@@ -108,13 +107,17 @@ Triggers are 2h (CH1) and 3h (CH2) after each 00/06/12/18Z MeteoSwiss release.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/forecast/station` | Hourly blended forecast, params: `station_id`, `hours` |
+| GET | `/api/forecast/station` | Hourly blended forecast (wind, temp, humidity, pressure, precip), params: `station_id`, `hours` |
 | GET | `/api/forecast/altitude-winds` | Pressure-level winds at 9 altitude bands, params: `station_id`, `hours` |
-| GET | `/api/forecast/wind-grid` | 171-point wind grid (stub — not yet populated by collectors) |
+| GET | `/api/forecast/wind-grid` | ~1 km wind grid (ws/wd/rh) at one altitude level, params: `level_m`, `bbox`, `stride_km` |
+| GET | `/api/forecast/thermal-grid` | ~1 km thermal/convection grid (solar, cloud, CAPE/CIN, freezing level, LCL/LFC/TKE), params: `bbox`, `stride_km` |
 | GET | `/api/stations` | Proxy to Lenticularis — avoids browser CORS |
 | GET | `/dashboard` | Operational dashboard (collection state, cache, error log) |
-| GET | `/accuracy` | Accuracy analysis GUI |
+| GET | `/data` | Data Inspector GUI (query station / altitude-wind / thermal-grid) |
 | GET | `/health` | Cache stats + service health |
+
+Grid endpoints (`/wind-grid`, `/thermal-grid`) reject responses over 10 M values
+(`points × frames × fields`) with `400 response_too_large` — increase `stride_km` or shrink `bbox`.
 
 ---
 
