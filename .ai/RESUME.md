@@ -29,10 +29,9 @@ the loop keeps serving. Verified by CI: `1 passed in 295.45s` — the integratio
 a torn frame for a fraction of a second 8×/day — better than an 8-minute outage. No lock, since
 holding one across the build would recreate the outage for readers.
 
-**Open**: v0.3.5 tagged and image published, but the **PRD deploy was not observed**. Confirm the
-UI stays reachable *during* a collection window (hit `/health` while the log is between
-`Cached forecast for ...` and `Wind-grid combined store: ...`). Note deploying restarts the
-container and re-triggers warm-up.
+**CONFIRMED on PRD** (2026-07-16): deployed and the web UI stayed reachable *through* a collection
+window. Dashboard also showed Expected = Cached = `2026-07-16T18:00Z` with Currency `✓ up to
+date`, i.e. the 20:00Z CH1 cron collecting the 18:00Z run exactly as designed.
 
 **Found, not fixed — altitude winds**: PRD logs
 `CH1 level_indices (target_hpa→arr_idx): {500: 79, 600: 79, 700: 79, 750: 79, 800: 79, 850: 79,
