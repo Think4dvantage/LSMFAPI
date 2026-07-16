@@ -474,8 +474,10 @@ class IconCh2EpsCollector(BaseCollector):
                 )
                 logger.info("CH2 cached forecast for %s (%d hours)", station_id, len(forecast_list))
 
+            # Off the event loop — see the CH1 collector. CH2 spans 87 horizons
+            # (~2.6× CH1), so this blocks for ~20 min if run inline.
             try:
-                self.collect_grid(ref_dt, tmpdir, level_indices)
+                await asyncio.to_thread(self.collect_grid, ref_dt, tmpdir, level_indices)
             except Exception:
                 logger.exception("CH2 grid collection failed — station data unaffected")
 

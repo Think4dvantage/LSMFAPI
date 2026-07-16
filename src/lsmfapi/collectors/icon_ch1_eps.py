@@ -1051,9 +1051,12 @@ class IconCh1EpsCollector(BaseCollector):
                 )
                 logger.info("Cached forecast for %s (%d hours)", station_id, len(forecast_list))
 
-            # Grid collection reads the U/V GRIBs kept in tmpdir
+            # Grid collection reads the U/V GRIBs kept in tmpdir. Off the event loop:
+            # it parses hundreds of GRIBs (~8 min for CH1) and would otherwise block
+            # uvicorn for that whole window — /health included. eccodes (via cffi) and
+            # numpy release the GIL, so the loop keeps serving while this runs.
             try:
-                self.collect_grid(ref_dt, tmpdir, level_indices)
+                await asyncio.to_thread(self.collect_grid, ref_dt, tmpdir, level_indices)
             except Exception:
                 logger.exception("Grid collection failed — station data unaffected")
 
