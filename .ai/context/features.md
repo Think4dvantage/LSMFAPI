@@ -1,6 +1,6 @@
 # Feature History & Backlog
 
-## Current Version: v0.3.4
+## Current Version: v0.3.5
 
 ### Shipped Milestones
 
@@ -13,6 +13,7 @@
 | v0.3.2 | Thermal grid endpoint: `GET /api/forecast/thermal-grid` — LCL_ML, LFC_ML, TKE added to SURFACE_VARS; `_build_thermal_grid_cache()` in CH1 + CH2; `ThermalGridCache` with npz persistence; accuracy GUI removed, `accuracy.py` merged into `dashboard.py` |
 | v0.3.3 | Grid memory reduction: float16 grid storage, combined single-array grid store (no merge-on-read copy), `/grid` + `/thermal-grid` response budget cap. Peak RAM ~8–16 GB → ~2 GB |
 | v0.3.4 | eccodes stack pinned: `poetry.lock` committed, explicit `eccodeslib`, apt libeccodes and the conda CI step removed. Fixes the v0.3.3 PRD crash loop and turns CI green for the first time |
+| v0.3.5 | Grid build moved off the event loop (`asyncio.to_thread`) — the API stayed unreachable for the whole build (~8 min CH1, ~20 min CH2), ~1.5–2 h/day |
 
 ---
 
@@ -135,6 +136,35 @@ never passed once. Had it been green it would have caught the mismatch before th
   one libeccodes now exists (the `eccodeslib` wheel), so the image matches the green CI env
 - Pinned stack: `eccodes` 2.47.0 + `eccodeslib` 2.47.3.23 + `eccodes-cosmo-resources-python`
   2.44.0.1, verified against real ICON GRIB by the integration test
+
+---
+
+## v0.3.5 — Grid Build Off The Event Loop ✓ SHIPPED
+
+`collect_grid()` was called synchronously from inside `async def collect()`, so it held the event
+loop for the entire grid build and uvicorn served nothing — `/health` included. The healthcheck
+(`timeout=5s`, `retries=2`) failed ~30 s in, Traefik dropped the container, and the web UI
+vanished while collection itself was perfectly healthy.
+
+Measured on PRD: a **7 m 48 s** gap between the last `Cached forecast for ...` line and
+`Wind-grid combined store: wrote 34 frames`. CH2 spans 87 horizons to CH1's 34, so its window is
+~20 min. Across 8 runs/day that is **~1.5–2 h of daily unavailability**, plus warm-up on every
+restart.
+
+Latent since the grid feature landed — only visible once v0.3.4 let a collection run to
+completion instead of crash-looping.
+
+**Fix**: `await asyncio.to_thread(self.collect_grid, ...)` in both collectors. eccodes (via cffi)
+and numpy's array ops release the GIL, so the loop keeps serving through the heavy parts.
+
+**Trade-off accepted**: this introduces real concurrency the blocking loop previously prevented.
+The slow part (`_build_grid_wind_cache`) builds a **local** object touching no shared state; only
+`set_grid_wind_cache()` writes the shared store, and that is a sub-second slice copy. So a `/grid`
+reader may observe a torn frame for a fraction of a second 8×/day — strictly better than an
+8-minute outage. No lock: holding one across the build would just recreate the outage for readers.
+
+**Rule going forward**: never call a GRIB/numpy-heavy function directly from `async def`. See
+`04-constraints.md`.
 
 ---
 

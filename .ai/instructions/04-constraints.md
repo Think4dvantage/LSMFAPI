@@ -40,6 +40,18 @@ The `scheduler:` section in `config.yml` is dead config — the scheduler uses h
 
 ---
 
+## Async / Event Loop
+
+**Never call CPU-bound work directly from `async def`.** GRIB parsing, KD-tree builds, and large numpy reductions must go through `await asyncio.to_thread(...)`. The API and the collectors share one event loop and one process: anything synchronous blocks *every* HTTP request for its full duration, `/health` included, which fails the healthcheck and makes Traefik drop the container.
+
+This is not theoretical. `collect_grid()` was called inline from `async def collect()` and took the web UI down for ~8 min per CH1 run and ~20 min per CH2 run — ~1.5–2 h/day — while collection itself looked perfectly healthy in the logs. Fixed in v0.3.5.
+
+**The tell**: a long gap between consecutive log lines with no output. If a function can log "started" and then say nothing for minutes, it is blocking the loop.
+
+eccodes (via cffi) and numpy release the GIL, so a worker thread genuinely restores responsiveness rather than merely moving the stall.
+
+---
+
 ## Dependencies & eccodes
 
 **Never remove `poetry.lock`, and never make it optional.** The Dockerfile does `COPY pyproject.toml poetry.lock ./` — deliberately not `poetry.lock*`. The glob silently fell back to a fresh resolve, which is how three inputs drifted under a fixed image tag and crash-looped PRD (v0.3.3). A missing lock must fail the build loudly.

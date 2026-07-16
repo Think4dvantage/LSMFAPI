@@ -359,6 +359,12 @@ Fixes a PRD crash loop and a 10-week CI outage that shared one root cause: there
 - **CI red since 2026-05-08** — the v0.3.1 conda step could never solve and failed in ~26 s, so the integration test never ran. A green run would have caught the mismatch before the image shipped.
 - **Fixes** — `poetry.lock` committed and now mandatory in the Dockerfile (no `*` glob); `eccodeslib` declared explicitly (`platform_system != 'Windows'`); apt `libeccodes-dev` and the conda CI step removed, leaving exactly one libeccodes. Pinned: `eccodes` 2.47.0 + `eccodeslib` 2.47.3.23 + `eccodes-cosmo-resources-python` 2.44.0.1, verified against real ICON GRIB by the integration test.
 
+### v0.3.5 — Grid build off the event loop ✅ Shipped
+
+- `collect_grid()` ran synchronously inside `async def collect()`, holding the event loop for the whole grid build — uvicorn served nothing, `/health` included, so the healthcheck failed and Traefik dropped the container. Measured on PRD: a 7m48s silent gap; CH2 (87 horizons) is ~20 min. Roughly 1.5–2h of dead UI per day across the 8 collection windows.
+- Fixed with `await asyncio.to_thread(self.collect_grid, ...)` in both collectors — eccodes and numpy release the GIL, so the API keeps serving during collection.
+- Latent since the grid feature landed; only visible once v0.3.4 let a collection finish instead of crash-looping.
+
 ### v0.4 — Recipes
 
 - `Recipe` + `RecipeRule` SQLite models

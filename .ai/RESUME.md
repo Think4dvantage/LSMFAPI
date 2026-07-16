@@ -2,6 +2,47 @@
 
 ## What Was Done This Session
 
+### v0.3.5 — grid build moved off the event loop
+
+**v0.3.4 confirmed working on PRD** by collector logs: GRIB parsing succeeds,
+`CH1 ensemble members in GRIB: 10`, 500+ stations cached, no crash loop. The eccodes fix below
+is verified in production.
+
+That exposed the next bug. With collection finally running to completion, the **web UI became
+unreachable while collecting**. `collect_grid()` was called synchronously from inside
+`async def collect()` (`icon_ch1_eps.py:1056`, `icon_ch2_eps.py:478`) — no `await`, no thread —
+so it held the event loop for the whole grid build. uvicorn served nothing, `/health` included;
+the healthcheck (`timeout=5s`, `retries=2`) failed ~30 s in and Traefik dropped the container.
+
+**The tell**: a 7 m 48 s gap in the PRD log with zero output —
+`17:10:33 Cached forecast for wunderground-IWENGE3` → `17:18:21 Wind-grid combined store: wrote
+34 frames`. CH2 spans 87 horizons vs CH1's 34, so ~20 min. ~1.5–2 h/day across 8 runs, plus
+warm-up on every restart. Latent since the grid feature landed.
+
+**Fix**: `await asyncio.to_thread(self.collect_grid, ref_dt, tmpdir, level_indices)` in both
+collectors (`asyncio` was already imported in each). eccodes (cffi) and numpy release the GIL, so
+the loop keeps serving. Verified by CI: `1 passed in 295.45s` — the integration test drives
+`collect()`, so it exercises the threaded path.
+
+**Trade-off accepted**: the slow part builds a *local* object touching no shared state; only
+`set_grid_wind_cache()` writes the shared store (sub-second slice copy). A `/grid` reader may see
+a torn frame for a fraction of a second 8×/day — better than an 8-minute outage. No lock, since
+holding one across the build would recreate the outage for readers.
+
+**Open**: v0.3.5 tagged and image published, but the **PRD deploy was not observed**. Confirm the
+UI stays reachable *during* a collection window (hit `/health` while the log is between
+`Cached forecast for ...` and `Wind-grid combined store: ...`). Note deploying restarts the
+container and re-triggers warm-up.
+
+**Found, not fixed — altitude winds**: PRD logs
+`CH1 level_indices (target_hpa→arr_idx): {500: 79, 600: 79, 700: 79, 750: 79, 800: 79, 850: 79,
+900: 79, 920: 79, 950: 79}` — **all nine pressure levels resolve to the same array index 79**.
+This is the long-standing "altitude winds U/V/W all null" issue and explains the
+`All-NaN slice encountered` warnings from `ensemble.py:15-17` and `icon_ch1_eps.py:434/437/440`.
+Start at the level-index lookup that builds `level_indices`.
+
+---
+
 ### v0.3.4 — eccodes stack pinned (PRD crash loop + 10-week CI outage, one root cause)
 
 Two separate-looking failures, one cause: **there was no `poetry.lock`**, so every build resolved
@@ -63,13 +104,9 @@ The definitions path `/usr/share/eccodes/definitions` proved `eccodeslib` was ab
 29479520661). Image build 29504233120 confirms `Installing eccodeslib (2.47.3.23)`. Published
 `ghcr.io/think4dvantage/lsmfapi:0.3.4`.
 
-**Open — needs confirmation**: v0.3.4 was tagged and the image pushed, but **PRD redeploy was not
-observed**. Confirm on the Fedora host that the crash loop is gone. Success markers: definitions
-path vendor half inside `site-packages/eccodeslib/` (**not** `/usr/share/eccodes/definitions`);
-no "ecCodes 2.42.0 or higher is recommended" warning; `Constants file messages (shortName): [...]`
-present; `KD-tree built: ~1147980 grid points`. If it still loops:
-`docker inspect <container> --format '{{.State.ExitCode}} {{.State.OOMKilled}}'` — 134/139 is
-still an eccodes abort, `OOMKilled=true` is a different problem.
+**CONFIRMED on PRD** (2026-07-16 17:10 logs): crash loop gone, GRIB parsing succeeds,
+`CH1 ensemble members in GRIB: 10`, 500+ stations cached, grid caches written. This fix is
+verified in production.
 
 **Deferred**: `FROM python:3.11-slim` still floats (same class of drift, now harmless for eccodes
 since apt is out of the picture — pin to a digest if it bites again). `actions/checkout@v4` /
