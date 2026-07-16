@@ -1,6 +1,6 @@
 # Feature History & Backlog
 
-## Current Version: v0.3.3
+## Current Version: v0.3.4
 
 ### Shipped Milestones
 
@@ -9,9 +9,10 @@
 | v0.1 | Core collectors, forecast API, altitude winds endpoint, cache persistence, accuracy GUI stations proxy |
 | v0.2 | Dashboard, Data Inspector, GitHub Actions Docker pipeline, CH1/CH2 cache merge |
 | v0.3 | Hourly CH2 tail (h34–120), 4×/day schedule, NULL fix (dynamic N_MEMBERS), GRIB persistence cache, dashboard ok/failed counts, error recording, HBAS_CON/HPBL removed |
-| v0.3.1 | CI eccodes fix, Traefik label isolation (PRD/DEV), scheduler lock (warm-up/cron race) |
+| v0.3.1 | Traefik label isolation (PRD/DEV), scheduler lock (warm-up/cron race). Also shipped a CI eccodes "fix" that never worked — see v0.3.4 |
 | v0.3.2 | Thermal grid endpoint: `GET /api/forecast/thermal-grid` — LCL_ML, LFC_ML, TKE added to SURFACE_VARS; `_build_thermal_grid_cache()` in CH1 + CH2; `ThermalGridCache` with npz persistence; accuracy GUI removed, `accuracy.py` merged into `dashboard.py` |
 | v0.3.3 | Grid memory reduction: float16 grid storage, combined single-array grid store (no merge-on-read copy), `/grid` + `/thermal-grid` response budget cap. Peak RAM ~8–16 GB → ~2 GB |
+| v0.3.4 | eccodes stack pinned: `poetry.lock` committed, explicit `eccodeslib`, apt libeccodes and the conda CI step removed. Fixes the v0.3.3 PRD crash loop and turns CI green for the first time |
 
 ---
 
@@ -53,7 +54,7 @@
 
 ## v0.3.1 — Production Fixes ✓ SHIPPED
 
-- **CI eccodes**: `ubuntu-latest` ships libeccodes 2.34.1; COSMO definitions require 2.38+. Fixed by installing eccodes 2.38.3 from conda-forge via Miniforge, with `LD_LIBRARY_PATH` pointing to conda lib.
+- **CI eccodes**: ⚠️ **this fix never worked.** `ubuntu-latest` ships libeccodes 2.34.1 and the COSMO definitions required 2.38+, so a Miniforge + conda-forge step was added. It failed on its very first run and every run after, so the integration test did not execute at all between 2026-05-08 and 2026-07-16. Properly fixed in v0.3.4.
 - **Traefik cross-routing**: base `docker-compose.yml` had PRD Traefik labels that bled into DEV container via overlay merge, causing Traefik to load-balance between PRD and DEV. Fixed by removing all labels from the base file (PRD labels live in server-side compose only).
 - **Scheduler warm-up/cron race**: container starts at 19:58Z with ref_dt=12Z; cron fires at exactly 20:00Z with ref_dt=18Z; `_purge_stale` deletes the active 12Z GRIB directory mid-download. Fixed with per-model `asyncio.Lock()` in `scheduler.py` — concurrent same-model runs skip instead of overlapping.
 
@@ -96,6 +97,44 @@ performance. Three independent changes:
   before allocating, and build responses as plain dicts (no intermediate Pydantic frame
   models). Blocks the fine-`stride_km` full-bbox request that could allocate 10+ GB of Python
   floats. Default `stride_km=10` full-bbox request is unaffected.
+
+---
+
+## v0.3.4 — eccodes Stack Pinned ✓ SHIPPED
+
+Fixes two failures with one root cause: **unpinned dependencies drifting under fixed tags**.
+There was no `poetry.lock`, so every build resolved fresh.
+
+**PRD crash loop (v0.3.3 image)** — container restarted every ~15 s, dying inside
+`_read_grid_coords()` with no traceback and no `logger.exception` output. Three drifts combined:
+
+- `python:3.11-slim` rolled bookworm → trixie: apt libeccodes 2.28 → **2.41.0**
+- `eccodes` floated to **2.47.0**, which no longer ships a Linux wheel bundling the C library —
+  that moved to the separate `eccodeslib` package
+- `eccodes-cosmo-resources-python` floated to **2.44.0.1**, needing library ≥ 2.44
+
+Poetry resolves from PyPI's JSON metadata, which **omits** the `eccodeslib` dependency the wheel
+actually declares — so it was never installed, `findlibs` fell through to apt's 2.41.0, and
+definitions (2.44) outranked the library (2.41.0). ecCodes aborted the process on the first GRIB
+parse. An abort is not a Python exception, so the broad `except Exception` in `_run_ch1eps` never
+logged and PID 1 died silently.
+
+**CI red since 2026-05-08** — the v0.3.1 conda step targeted the Miniforge base env where
+conda/mamba live; the old eccodes pin dragged in libnetcdf → libxml2 → icu versions that could
+not coexist with mamba. `LibMambaUnsatisfiableError` at ~26 s, before pytest ever started. It
+never passed once. Had it been green it would have caught the mismatch before the image shipped.
+
+**Fixes**
+
+- `poetry.lock` committed; `COPY pyproject.toml poetry.lock` in the Dockerfile (no `*` glob —
+  a missing lock now fails the build instead of silently resolving fresh)
+- `eccodeslib` declared explicitly with `markers = "platform_system != 'Windows'"` — required
+  because PyPI JSON metadata omits it, and because Poetry on Windows locks from the win_amd64
+  wheel whose metadata genuinely lacks it
+- apt `libeccodes-dev` removed from the Dockerfile and the conda step removed from CI — exactly
+  one libeccodes now exists (the `eccodeslib` wheel), so the image matches the green CI env
+- Pinned stack: `eccodes` 2.47.0 + `eccodeslib` 2.47.3.23 + `eccodes-cosmo-resources-python`
+  2.44.0.1, verified against real ICON GRIB by the integration test
 
 ---
 

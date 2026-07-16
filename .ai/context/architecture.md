@@ -299,12 +299,39 @@ cosmo_path = eccodes_cosmo_resources.get_definitions_path()
 eccodes.codes_set_definitions_path(f"{cosmo_path}:{vendor_path}")
 ```
 
-**No system package needed beyond `libeccodes-dev`** (already in Dockerfile). No env var required if using the Python API above.
+**No system libeccodes anywhere** — not in the Dockerfile, not in CI. The C library comes
+from the `eccodeslib` wheel and nothing else. No env var required if using the Python API above.
 
-**Pinned versions** (from MeteoSwiss opendata-nwp-demos):
-- `eccodes==2.38.3`
-- `eccodes-cosmo-resources-python==2.38.3.1`
-- `cfgrib==0.9.15.0`
+### The eccodes stack — three parts that must stay in step
+
+| Part | Package | Role |
+|---|---|---|
+| Python binding | `eccodes` | Calls into the C library |
+| C library | `eccodeslib` (`lib64/libeccodes.so`) | Does the GRIB decoding |
+| ICON/COSMO definitions | `eccodes-cosmo-resources-python` | Teaches ecCodes the ICON shortNames |
+
+**Hard rule: library version ≥ definitions version.** Definitions newer than the library fail —
+in CI that surfaced as shortNames decoding to `<unknown>`; in the v0.3.3 container ecCodes
+aborted the process outright on the first parse (SIGABRT, no Python traceback, restart loop).
+
+`findlibs` picks the library in this order — **PACKAGE → PYTHON/conda → HOME → CONFIG_PATHS →
+LD_LIBRARY_PATH → SYS**. An installed `eccodeslib` therefore beats any system copy, and
+`LD_LIBRARY_PATH` is never consulted while it is present.
+
+**`eccodeslib` must be declared explicitly in `pyproject.toml`** (with
+`markers = "platform_system != 'Windows'"`). The `eccodes` wheel does depend on it, but PyPI's
+JSON metadata — which Poetry resolves from — omits that dependency, so Poetry silently skips it
+and findlibs falls through to whatever system library exists. See `04-constraints.md`.
+
+**Verify the resolved library at runtime** via the startup log line: the vendor half of the
+definitions path must sit inside `site-packages/eccodeslib/`. If it reads
+`/usr/share/eccodes/definitions`, a system library is in use and the stack is mismatched.
+
+**Pinned by `poetry.lock`** (exact versions live in the lock; regenerate with `poetry lock`):
+- `eccodes` 2.47.0 → wants library ≥ 2.42
+- `eccodeslib` 2.47.3.23 (+ `eckitlib`)
+- `eccodes-cosmo-resources-python` 2.44.0.1
+- `cfgrib` 0.9.15.1
 
 ---
 

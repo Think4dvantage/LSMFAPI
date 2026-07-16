@@ -8,8 +8,11 @@ LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the
 
 - Python 3.11+
 - [Poetry](https://python-poetry.org/) for dependency management
-- `libeccodes-dev` system library (required by `cfgrib` for GRIB2 parsing — handled automatically in Docker)
 - Docker + docker-compose
+
+No system GRIB library is needed. `poetry install` pulls the `eccodeslib` wheel, which ships
+`libeccodes.so`. **Do not install `libeccodes-dev`** — a system copy can only mismatch the
+Python binding (see the eccodes note under Architecture).
 
 ---
 
@@ -219,6 +222,29 @@ Together with the grid response cap, this keeps peak service RAM around ~2 GB (p
 
 GRIB files are stored in `/tmp/lsmfapi_grib/{model}/{YYYYMMDDTHHMMZ}/` (not a throwaway temp dir). Files survive container restarts: if the `ref_dt` hasn't changed, previously downloaded files are reused. When the `ref_dt` advances (new model run), old directories are deleted automatically on the next collector start. Corrupt files (eccodes parse failure) are deleted immediately so they are re-downloaded on the next run.
 
+### eccodes stack
+
+Three parts must stay in step, and all three come from `poetry.lock` — nothing from the system:
+
+| Part | Package | Role |
+|---|---|---|
+| Python binding | `eccodes` 2.47.0 | Calls into the C library |
+| C library | `eccodeslib` 2.47.3.23 | Decodes the GRIB (`lib64/libeccodes.so`) |
+| ICON definitions | `eccodes-cosmo-resources-python` 2.44.0.1 | Teaches ecCodes the ICON shortNames |
+
+**The library must never be older than the definitions.** If it is, ecCodes aborts the process on
+the first GRIB parse — no Python traceback, PID 1 dies, and the container restart-loops. That is
+what took PRD down on v0.3.3.
+
+Never install a system libeccodes (apt, conda, `LD_LIBRARY_PATH`). `findlibs` resolves an
+installed package ahead of every system path, so a second copy can only mismatch the binding.
+`eccodeslib` must stay declared explicitly in `pyproject.toml`: the `eccodes` wheel depends on it,
+but PyPI's JSON metadata — which Poetry reads — omits it, so Poetry otherwise skips it silently.
+
+To confirm which library is live, check the startup log: the vendor half of the definitions path
+must sit inside `site-packages/eccodeslib/`. `/usr/share/eccodes/definitions` means a system
+library leaked in.
+
 ### SQLite tables
 
 | Table | Key columns |
@@ -307,9 +333,9 @@ CH1 runs 2 hours after each 00/06/12/18Z model release; CH2 runs 3 hours after. 
 
 ### v0.3.1 — Production fixes ✅ Shipped
 
-- CI eccodes fix (conda-forge eccodes 2.38 via Miniforge; apt ships incompatible 2.34)
 - Traefik label isolation (PRD/DEV no longer cross-route)
 - Scheduler warm-up/cron race fixed with per-model `asyncio.Lock`
+- Attempted a CI eccodes fix (conda-forge eccodes 2.38 via Miniforge) that never worked — the integration test did not run at all until v0.3.4
 
 ### v0.3.2 — Thermal forecast grid ✅ Shipped
 
@@ -323,6 +349,15 @@ CH1 runs 2 hours after each 00/06/12/18Z model release; CH2 runs 3 hours after. 
 - **Combined single-array grid store** — collectors write horizon slices in place; reads are contiguous views (no per-request merge copy)
 - **Grid response budget cap** (10 M values) + plain-dict response build — blocks fine-`stride_km` full-bbox requests that could allocate 10+ GB of Python floats
 - Net: peak RAM ~8–16 GB (OOM at 8 GB) → ~2 GB, with faster reads
+
+### v0.3.4 — eccodes stack pinned ✅ Shipped
+
+Fixes a PRD crash loop and a 10-week CI outage that shared one root cause: there was no
+`poetry.lock`, so every build resolved dependencies fresh and drifted under fixed tags.
+
+- **PRD crash loop** — the v0.3.3 image restarted every ~15 s. `python:3.11-slim` had rolled bookworm → trixie (apt libeccodes 2.28 → 2.41.0), `eccodes` floated to 2.47.0 (which moved its C library into the separate `eccodeslib` package), and the COSMO definitions floated to 2.44.0.1. Poetry resolves from PyPI JSON metadata that omits the `eccodeslib` dependency, so it was never installed and `findlibs` fell back to apt's 2.41.0 — definitions newer than the library, which makes ecCodes abort the process on the first GRIB parse (no traceback, PID 1 dies).
+- **CI red since 2026-05-08** — the v0.3.1 conda step could never solve and failed in ~26 s, so the integration test never ran. A green run would have caught the mismatch before the image shipped.
+- **Fixes** — `poetry.lock` committed and now mandatory in the Dockerfile (no `*` glob); `eccodeslib` declared explicitly (`platform_system != 'Windows'`); apt `libeccodes-dev` and the conda CI step removed, leaving exactly one libeccodes. Pinned: `eccodes` 2.47.0 + `eccodeslib` 2.47.3.23 + `eccodes-cosmo-resources-python` 2.44.0.1, verified against real ICON GRIB by the integration test.
 
 ### v0.4 — Recipes
 

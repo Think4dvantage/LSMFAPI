@@ -13,13 +13,13 @@ LSMFAPI is a dedicated forecast ingestion and delivery service that replaces the
 | Language | Python 3.11+ |
 | Web framework | FastAPI |
 | Data validation | Pydantic v2 |
-| Dependency management | Poetry (`pyproject.toml`) |
+| Dependency management | Poetry (`pyproject.toml` + **committed `poetry.lock`** — CI and the image build the same pinned stack) |
 | Forecast cache | Python in-process: station/altitude CH1+CH2 dicts (merged at read time); grids in one combined float16 store (view at read time) |
 | Relational DB | SQLite via SQLAlchemy (no Alembic — raw ALTER TABLE in `_run_column_migrations()`) |
 | Scheduler | APScheduler (cron triggers) |
 | HTTP client | httpx (async) |
 | Config | YAML (`config.yml`) validated by Pydantic |
-| GRIB2 parsing | `cfgrib` + `xarray` + `eccodes` + `eccodes-cosmo-resources-python` |
+| GRIB2 parsing | `cfgrib` + `xarray` + `eccodes` (binding) + `eccodeslib` (C library — no system libeccodes) + `eccodes-cosmo-resources-python` (ICON defs) |
 | Spatial math | `scipy` (KD-tree nearest-point lookup) |
 | Frontend | Vanilla JS (English only — no i18n, no build step, no npm) |
 | Container | Docker + docker-compose |

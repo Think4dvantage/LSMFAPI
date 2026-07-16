@@ -1,3 +1,87 @@
+# Resume Notes — 2026-07-16
+
+## What Was Done This Session
+
+### v0.3.4 — eccodes stack pinned (PRD crash loop + 10-week CI outage, one root cause)
+
+Two separate-looking failures, one cause: **there was no `poetry.lock`**, so every build resolved
+dependencies fresh and drifted under fixed tags.
+
+#### Failure 1 — integration test CI red since 2026-05-08
+
+Every run failed in `Install libeccodes 2.38 via conda-forge` with `LibMambaUnsatisfiableError`
+at ~26 s, long before pytest. `conda install` targets the Miniforge **base** env where conda/mamba
+live; pinning `eccodes=2.38.3` dragged in an old libnetcdf → libxml2 → icu that could not coexist
+with the mamba stack. Miniforge *latest* was re-downloaded each run, so mamba advanced while the
+pin stood still until the solve became unsatisfiable.
+
+**The step never worked once** — including on the very commit that added it
+(`fix(ci): install libeccodes 2.38 via conda-forge`, run 25574237954). The v0.3.1 "CI eccodes fix"
+recorded as shipped in `features.md` and `RESUME.md` was never green. v0.3.3 merely inherited it.
+Those docs have been corrected.
+
+#### Failure 2 — PRD crash loop on the v0.3.3 image
+
+Container restarted every ~15 s on the Fedora host. Died inside `_read_grid_coords()`: the log
+never reached `Constants file messages (shortName): ...` (`icon_ch1_eps.py:201`), and the broad
+`except Exception` → `logger.exception("CH1-EPS collection failed")` in `_run_ch1eps` never fired.
+**No Python exception = not an exception** — ecCodes aborted the process; PID 1 died silently.
+
+Three drifts combined:
+- `python:3.11-slim` rolled **bookworm → trixie**: apt libeccodes 2.28 → **2.41.0**
+- `eccodes` floated to **2.47.0**, which no longer ships a Linux wheel bundling the C library —
+  it moved to the separate **`eccodeslib`** package
+- `eccodes-cosmo-resources-python` floated to **2.44.0.1**, needing library ≥ 2.44
+
+Poetry resolves from PyPI's JSON `info.requires_dist`, which **omits** `eccodeslib` even though
+the wheel and sdist declare it (`platform_system != "Windows"`). So Poetry never installed it,
+`findlibs` fell through to apt's 2.41.0, and definitions (2.44) outranked the library (2.41.0).
+
+Diagnosis was confirmed from the log alone: `min_recommended_version_str = "2.42.0"` exists only
+in eccodes-python **2.47.0**, and gribapi's `__version__` is the **C library** version — so
+"ecCodes 2.42.0 or higher is recommended. You are running version 2.41.0" pins both sides exactly.
+The definitions path `/usr/share/eccodes/definitions` proved `eccodeslib` was absent.
+
+#### Fixes shipped
+
+- **`poetry.lock` committed** (LF). Dockerfile now `COPY pyproject.toml poetry.lock ./` — the
+  `poetry.lock*` glob is gone, so a missing lock fails the build instead of resolving fresh.
+- **`eccodeslib` declared explicitly** in `pyproject.toml` with
+  `markers = "platform_system != 'Windows'"`. Required twice over: PyPI JSON metadata omits it,
+  **and** Poetry on Windows locks from the win_amd64 wheel whose metadata genuinely lacks it
+  (the win wheels bundle their own DLL). Without the explicit entry, locking from this Windows
+  box silently drops the C library.
+- **apt `libeccodes-dev` removed** from the Dockerfile; **conda/Miniforge step removed** from CI.
+  Exactly one libeccodes now exists. `findlibs` order is
+  **PACKAGE → PYTHON/conda → HOME → CONFIG_PATHS → LD_LIBRARY_PATH → SYS**, so the old
+  `LD_LIBRARY_PATH=$HOME/miniforge/lib` was always dead config.
+- Pinned: `eccodes` 2.47.0 + `eccodeslib` 2.47.3.23 + `eckitlib` 2.1.0.23 +
+  `eccodes-cosmo-resources-python` 2.44.0.1.
+
+**Verification**: integration test green for the first time in the workflow's history —
+`test_ch1_collects_interlaken PASSED, 1 passed in 252.15s` (real MeteoSwiss GRIB, run
+29479520661). Image build 29504233120 confirms `Installing eccodeslib (2.47.3.23)`. Published
+`ghcr.io/think4dvantage/lsmfapi:0.3.4`.
+
+**Open — needs confirmation**: v0.3.4 was tagged and the image pushed, but **PRD redeploy was not
+observed**. Confirm on the Fedora host that the crash loop is gone. Success markers: definitions
+path vendor half inside `site-packages/eccodeslib/` (**not** `/usr/share/eccodes/definitions`);
+no "ecCodes 2.42.0 or higher is recommended" warning; `Constants file messages (shortName): [...]`
+present; `KD-tree built: ~1147980 grid points`. If it still loops:
+`docker inspect <container> --format '{{.State.ExitCode}} {{.State.OOMKilled}}'` — 134/139 is
+still an eccodes abort, `OOMKilled=true` is a different problem.
+
+**Deferred**: `FROM python:3.11-slim` still floats (same class of drift, now harmless for eccodes
+since apt is out of the picture — pin to a digest if it bites again). `actions/checkout@v4` /
+`setup-python@v5` emit Node 20 deprecation warnings. `tests/` has no unit tests — the integration
+test is the only gate.
+
+**Note on local verification**: this dev box has no Docker and no WSL, and `eccodeslib` is
+Linux-only by marker, so Linux behavior cannot be run locally — CI is the only proof. Local
+`poetry install` also fails (Python 3.13 vs pinned numpy 1.26.4, which has no cp313 wheels).
+
+---
+
 # Resume Notes — 2026-07-15
 
 ## What Was Done This Session

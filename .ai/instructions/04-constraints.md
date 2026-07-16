@@ -40,6 +40,18 @@ The `scheduler:` section in `config.yml` is dead config — the scheduler uses h
 
 ---
 
+## Dependencies & eccodes
+
+**Never remove `poetry.lock`, and never make it optional.** The Dockerfile does `COPY pyproject.toml poetry.lock ./` — deliberately not `poetry.lock*`. The glob silently fell back to a fresh resolve, which is how three inputs drifted under a fixed image tag and crash-looped PRD (v0.3.3). A missing lock must fail the build loudly.
+
+**Never install a system libeccodes** — no `apt-get install libeccodes-dev`, no conda, no Miniforge, no `LD_LIBRARY_PATH`. The C library ships in the `eccodeslib` wheel, and `findlibs` prefers an installed package over every system path. A second copy can only mismatch the binding. Debian's version tracks the base image suite (bookworm 2.28 → trixie 2.41.0) and will drift out from under you.
+
+**Never drop the explicit `eccodeslib` entry from `pyproject.toml`.** The `eccodes` wheel declares it, but PyPI's JSON metadata — Poetry's resolution source — omits it, so Poetry skips it and findlibs falls through to a system library. Poetry compounds this on Windows by locking from the win_amd64 wheel, whose metadata genuinely lacks the dependency. The explicit entry (with `markers = "platform_system != 'Windows'"`) is the only thing that survives both.
+
+**Keep library ≥ definitions.** `eccodeslib` must never be older than `eccodes-cosmo-resources-python`. Definitions newer than the library make ecCodes abort the process on the first GRIB parse — no Python exception, no traceback, PID 1 dies, container restart-loops. Bump both together.
+
+---
+
 ## Scheduler
 
 **Never start two collections of the same model concurrently.** The `_ch1_lock` / `_ch2_lock` asyncio locks in `scheduler.py` enforce this. If a cron trigger fires while the previous run is still active, it logs a skip and returns. This prevents `_purge_stale` from deleting the active GRIB directory mid-download.

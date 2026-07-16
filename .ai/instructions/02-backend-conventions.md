@@ -63,7 +63,7 @@ Add new keys to Pydantic models in `config.py` **and** to `config.yml.example`. 
 
 ## Testing
 
-Integration tests live in `tests/` with `@pytest.mark.integration`. Run with `pytest -m integration -v`. The CI workflow (`.github/workflows/integration-test.yml`) uses Miniforge + conda-forge eccodes 2.38 because the system apt package (2.34.1 on Ubuntu 24.04) is incompatible with `eccodes-cosmo-resources-python==2.38.x`.
+Integration tests live in `tests/` with `@pytest.mark.integration`. Run with `pytest -m integration -v`. The CI workflow (`.github/workflows/integration-test.yml`) needs no eccodes setup at all — `poetry install` provides the C library via the `eccodeslib` wheel. See `06-testing-conventions.md`.
 
 ---
 

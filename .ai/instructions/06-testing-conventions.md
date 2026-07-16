@@ -59,7 +59,13 @@ async def test_ch1_collects_interlaken(monkeypatch):
 
 `.github/workflows/integration-test.yml` runs on push to `main` and on PRs.
 
-**eccodes setup in CI**: `ubuntu-latest` (Ubuntu 24.04) ships `libeccodes 2.34.1` via apt — incompatible with `eccodes-cosmo-resources-python==2.38.x`. The workflow installs `eccodes=2.38.3` from conda-forge via Miniforge and sets `LD_LIBRARY_PATH=$HOME/miniforge/lib` so Python `findlibs` resolves the correct C library. Do not add `apt-get install libeccodes-dev` to the workflow.
+**eccodes setup in CI**: none — and none is needed. `poetry install` pulls the `eccodeslib` wheel, which ships the C library, and `findlibs` resolves an installed package ahead of `LD_LIBRARY_PATH` and system paths. Do not add `apt-get install libeccodes-dev`, conda, Miniforge, or `LD_LIBRARY_PATH` to the workflow: a system library can only mismatch the binding, never help.
+
+A conda/Miniforge step existed from v0.3.1 until 2026-07-16 and **never produced a single green run** — `conda install` targets the Miniforge base env where conda/mamba live, and pinning the old eccodes there made the solve unsatisfiable. It failed in ~26s, well before pytest started.
+
+**Judging a run**: a real pass reads `1 passed in ~250s`. Anything finishing under ~60s failed in setup and never executed the test.
+
+**A green run is load-bearing.** This test is the only thing that exercises the eccodes stack against real ICON GRIB before an image ships. While CI was red (2026-05-08 → 2026-07-16) an eccodes mismatch reached PRD and crash-looped it. Do not tag a release on a red integration test.
 
 ---
 
