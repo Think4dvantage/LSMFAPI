@@ -16,6 +16,11 @@ sqlalchemy = "^2.0"
 cfgrib = "^0.9.15"
 xarray = "^2024.0"
 eccodes = "^2.38"
+# The Linux eccodes wheel depends on eccodeslib (the C library) but the Windows
+# wheels of the same release do not. Poetry locks from whichever file matches the
+# host, so locking on Windows would silently drop it. Declared explicitly to keep
+# the lock correct no matter where it is generated.
+eccodeslib = {version = "^2.47", markers = "platform_system != 'Windows'"}
 eccodes-cosmo-resources-python = "^2.38"
 scipy = "^1.14"
 numpy = "^1.26"
