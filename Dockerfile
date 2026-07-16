@@ -1,15 +1,15 @@
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y \
-    libeccodes-dev \
-    && rm -rf /var/lib/apt/lists/*
-
+# No apt libeccodes: the eccodeslib wheel ships the C library matching the
+# eccodes binding. Debian's copy tracks the base image suite (trixie moved it to
+# 2.41.0), which silently drifts out of range of the COSMO definitions and makes
+# ecCodes abort the process on the first GRIB parse.
 WORKDIR /app
 
 RUN pip install --no-cache-dir poetry \
     && poetry config virtualenvs.create false
 
-COPY pyproject.toml poetry.lock* ./
+COPY pyproject.toml poetry.lock ./
 RUN poetry install --only main --no-root --no-interaction --no-ansi
 
 COPY src/ ./src/
