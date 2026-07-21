@@ -30,9 +30,18 @@ in this repo's compose.
 - Router `_VALID_GRID_LEVELS` now from `ALTITUDE_TARGETS_M`. Integration test asserts altitude
   winds are distinct/ordered (guards the collapse regression).
 
-**Verification**: all files byte-compile; interp helper unit-tested. Linux/eccodes path verified
-via **CI** (adds a ~172 MB vertical-constants download; a real pass is `1 passed in ~250s+`) then
-PRD — see [[env-no-local-linux]]. Not yet pushed at time of writing.
+**Verification**: interp helper unit-tested locally (identity, terrain-null, exact linear
+weight, level-mismatch guard). **Committed + pushed to `main` (`41e7bda`), tagged `v0.3.6`,
+tag pushed. CI GREEN — `1 passed, 10 warnings in 297.14s`** (run 29827495256), which now also
+exercises the new altitude-winds distinctness assertion, so the HHL height interpolation is
+proven against real ICON GRIB. The test adds a ~172 MB vertical-constants download.
+
+**Still open — PRD deploy of v0.3.6 not yet done.** After deploy, confirm on PRD:
+- log lines `CH1 model-level heights: 80 levels × 1147980 points, MAMSL range [...]` and
+  `CH1/CH2 altitude winds: interpolated U/V/W to 9 MAMSL bands`;
+- `/api/forecast/altitude-winds` returns distinct per-height winds with `vertical_wind` populated;
+- the GRIB disk on `/mnt/cache` stops ballooning now that W is deleted mid-run.
+See [[env-no-local-linux]] and [[altitude-winds-hhl-fix]].
 
 ---
 
