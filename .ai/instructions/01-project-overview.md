@@ -99,7 +99,7 @@ Triggers are 2h (CH1) and 3h (CH2) after each 00/06/12/18Z MeteoSwiss release.
 
 **Not in EPS catalog**: `HBAS_CON` (cloud base) and `HPBL` (boundary layer height) — do NOT add these back to SURFACE_VARS.
 
-**Altitude winds** (separate endpoint): U/V/W at 9 pressure levels → mapped to 500/800/1000/1500/2000/2500/3000/4000/5000 m ASL.
+**Altitude winds** (separate endpoint): U/V/W on ~80 native model levels, linearly interpolated to true geometric heights 500/800/1000/1500/2000/2500/3000/4000/5000 m MAMSL using per-gridpoint HHL level heights (the EPS files carry no pressure coordinate). Bands below a point's terrain are null.
 
 ---
 

@@ -40,12 +40,23 @@ _GRID_SAMPLE_INDICES: np.ndarray | None = None
 _GRID_N_LAT: int = 0
 _GRID_N_LON: int = 0
 
+# Full-level geometric heights (m MSL) per ICON grid point, derived once from the static
+# HHL vertical constants. Shape (n_full_levels, n_grid_points), float16 (~184 MB for CH1's
+# 1.14 M points; heights round to ~4 m at 4 km — ample for wind interpolation). Sliced at
+# station / grid-sample indices to interpolate altitude winds onto fixed MAMSL bands.
+_GRID_LEVEL_HEIGHTS: np.ndarray | None = None
+
 # Default Switzerland bbox for grid pre-sampling
 GRID_LAT_MAX = 47.9
 GRID_LAT_MIN = 45.8
 GRID_LON_MIN = 5.9
 GRID_LON_MAX = 10.6
 GRID_STEP_DEG = 1.0 / 111.0  # ~1 km
+
+# One-time vertical-structure diagnostic guard, keyed by typeOfLevel (see
+# _read_grib2_eccodes). Lets a multi-level GRIB log its level layout exactly once
+# per process instead of once per file.
+_VLEVEL_DIAG_SEEN: set[str] = set()
 
 # ---------- Collection constants ----------
 COLLECTION = "ch.meteoschweiz.ogd-forecasting-icon-ch1"
@@ -64,10 +75,12 @@ ACCUM_VARS: frozenset[str] = frozenset({"TOT_PREC", "DURSUN", "ASWDIR_S", "ASWDI
 
 PRESSURE_VARS: list[str] = ["U", "V", "W"]   # full set used by CH2
 CH1_PRESSURE_VARS: list[str] = ["U", "V", "W"]  # W confirmed available in CH1 STAC catalog at same pressure levels as U/V
-ALTITUDE_TO_HPA: dict[int, int] = {
-    500: 950, 800: 920, 1000: 900, 1500: 850, 2000: 800,
-    2500: 750, 3000: 700, 4000: 600, 5000: 500,
-}
+# Altitude bands reported by the altitude-winds endpoint and the wind grid, in metres
+# above mean sea level. Winds are interpolated to these exact geometric heights per grid
+# point from the model levels (see _interp_to_heights); bands below a point's terrain
+# resolve to null. Replaces the old pressure-level mapping — the EPS U/V/W files carry no
+# pressure coordinate (generalVerticalLayer model levels, no pv), so heights come from HHL.
+ALTITUDE_TARGETS_M: list[int] = [500, 800, 1000, 1500, 2000, 2500, 3000, 4000, 5000]
 
 DOWNLOAD_CONCURRENCY = 6
 
@@ -219,49 +232,75 @@ def _read_grid_coords(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return lats, lons
 
 
-def _approx_hybrid_to_pressure_hpa(
-    unique_levels: list[int],
-    pv: np.ndarray,
-    p_surf_pa: float = 101325.0,
+def _interp_to_heights(
+    field: np.ndarray,
+    level_heights: np.ndarray,
+    targets_m: np.ndarray,
 ) -> np.ndarray:
-    """Convert ICON generalVerticalLayer indices to approximate pressure in hPa.
+    """Linearly interpolate a per-model-level field onto fixed MAMSL target heights.
 
-    ICON hybrid coordinate: p(k) = 0.5*[(ak[k-1]+bk[k-1]*p_surf)+(ak[k]+bk[k]*p_surf)]
-    pv layout: [ak_0 ... ak_N, bk_0 ... bk_N]  (N+1 half-levels, Pa / dimensionless).
+    field         : (M, L, N) — members × model levels × grid points
+    level_heights : (L, N)     — geometric height (m MSL) of each model level per point
+    targets_m     : (T,)       — target heights (m MSL)
+    returns       : (M, T, N)  — NaN where a target is below the point's lowest model level
+                                 (underground) or above its highest.
+
+    ICON model levels run top→bottom (height decreasing with index); the level axis is
+    flipped once to ascending height for a vectorised per-column bracket search. Heights
+    are static, so the same level_heights serve every horizon. Kept in float32 to avoid a
+    large float64 copy of the (members × levels × points) input.
     """
-    n_half = len(pv) // 2
-    ak = pv[:n_half]
-    bk = pv[n_half:]
-    result = []
-    for lvl in unique_levels:
-        k = int(lvl)
-        if 1 <= k <= n_half - 1:
-            p_above = ak[k - 1] + bk[k - 1] * p_surf_pa
-            p_below = ak[k]     + bk[k]     * p_surf_pa
-            result.append(0.5 * (p_above + p_below) / 100.0)
-        else:
-            result.append(float(lvl))  # fallback: treat as hPa
-    return np.array(result, dtype=float)
+    if level_heights.shape[0] != field.shape[1]:
+        # Level count mismatch (unexpected) — cannot align; return all-NaN rather than guess.
+        return np.full((field.shape[0], len(targets_m), field.shape[2]), np.nan, dtype=np.float32)
+
+    z = level_heights.astype(np.float32)
+    f = field if field.dtype == np.float32 else field.astype(np.float32)
+    if z[0, 0] > z[-1, 0]:            # top→bottom → flip to ascending height
+        z = z[::-1]
+        f = f[:, ::-1, :]
+
+    M, L, N = f.shape
+    col = np.arange(N)
+    out = np.full((M, len(targets_m), N), np.nan, dtype=np.float32)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        for ti in range(len(targets_m)):
+            t = float(targets_m[ti])
+            lower = (z <= t).sum(axis=0) - 1      # (N,) lower bracket index; -1 => below lowest
+            valid = (lower >= 0) & (lower < L - 1)
+            k = np.clip(lower, 0, L - 2)
+            z0 = z[k, col]
+            z1 = z[k + 1, col]
+            denom = z1 - z0
+            w = np.where(denom > 0, (t - z0) / np.where(denom > 0, denom, 1.0), np.float32(0.0))
+            vals = f[:, k, col] * (1.0 - w) + f[:, k + 1, col] * w   # (M, N)
+            out[:, ti, :] = np.where(valid, vals, np.nan)
+    return out
 
 
-def _build_level_indices(level_hpa: np.ndarray) -> dict[int, int]:
-    """Map each altitude target pressure (ALTITUDE_TO_HPA values) to nearest level index.
+def _load_level_heights(path: Path) -> np.ndarray:
+    """Read HHL (height of half-levels) from a vertical_constants GRIB and return the
+    full-level geometric heights (m MSL), shape (n_full = n_half - 1, n_points), float16.
 
-    Uses nearest-match so it works for both isobaricInhPa (exact values) and
-    generalVerticalLayer (approximate pressures from hybrid coordinate conversion).
-    """
-    result = {}
-    for target_hpa in ALTITUDE_TO_HPA.values():
-        idx = int(np.argmin(np.abs(level_hpa - target_hpa)))
-        result[target_hpa] = idx
-    return result
+    Full-level height is the mean of the two bounding half-levels. Computed level-by-level
+    to avoid a second full-size float32 temporary (the raw HHL array is already ~370 MB for
+    CH1's 1.14 M points)."""
+    hhl, _ = _read_grib2_eccodes(path)           # (1, n_half, n_points), float32
+    if hhl is None or hhl.ndim != 3:
+        raise RuntimeError(f"HHL not found or unexpected shape in {path.name}")
+    half = hhl[0]                                 # (n_half, N) view
+    n_full = half.shape[0] - 1
+    full = np.empty((n_full, half.shape[1]), dtype=np.float16)
+    for k in range(n_full):
+        full[k] = 0.5 * (half[k] + half[k + 1])
+    return full
 
 
 def _read_grib2_eccodes(
     path: Path,
     extract_indices: np.ndarray | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Read a forecast GRIB2 file with eccodes, returning (values, level_hpa).
+    """Read a forecast GRIB2 file with eccodes, returning (values, level_coords).
 
     Two-pass read: pass 1 collects metadata only; pass 2 fills a pre-allocated
     array directly, one message at a time. This avoids accumulating all message
@@ -274,17 +313,16 @@ def _read_grib2_eccodes(
     values shape with extract_indices:
       Surface  : (n_members, len(extract_indices))
       Multi-lev: (n_members, n_levels, len(extract_indices))
-    level_hpa  : None for surface, ndarray of hPa for pressure-level files.
-                 For generalVerticalLayer files the hPa values are approximated
-                 from the embedded hybrid (pv) coordinate at standard sea-level
-                 pressure — use _build_level_indices() for a nearest-match lookup.
+    level_coords : None for surface; for multi-level files the sorted model-level
+                 numbers (generalVerticalLayer). These carry no pressure — the EPS
+                 U/V/W files have no pv — so geometric height comes from the static
+                 HHL constants (see _load_level_heights / _interp_to_heights).
     """
     # Pass 1: metadata scan — no values arrays stored
     unique_members: set[int] = set()
     unique_levels: set[int] = set()
     n_points: int = 0
     _level_type: str = ""
-    _pv: np.ndarray | None = None
 
     try:
         with open(str(path), "rb") as f:
@@ -299,11 +337,6 @@ def _read_grib2_eccodes(
                         n_points = eccodes.codes_get_size(msg, "values")
                     if not _level_type:
                         _level_type = _eccodes_get(msg, "typeOfLevel", default="") or ""
-                        if _level_type == "generalVerticalLayer" and _pv is None:
-                            try:
-                                _pv = eccodes.codes_get_array(msg, "pv").astype(np.float64)
-                            except Exception:
-                                pass
                 finally:
                     eccodes.codes_release(msg)
     except Exception as exc:
@@ -352,14 +385,18 @@ def _read_grib2_eccodes(
         raise
 
     if not is_surface:
-        if _level_type == "generalVerticalLayer" and _pv is not None:
-            level_coords = _approx_hybrid_to_pressure_hpa(sorted_levels, _pv)
-            logger.debug(
-                "generalVerticalLayer: %d levels, approx hPa range [%.0f, %.0f]",
-                len(level_coords), level_coords.min(), level_coords.max(),
+        # level_coords are the raw model-level numbers. EPS U/V/W arrive as ~80
+        # generalVerticalLayer levels with no embedded pressure (no pv), so pressure is not
+        # recoverable here; geometric height comes from the static HHL constants instead
+        # (see _load_level_heights / _interp_to_heights). Callers use level_coords only for
+        # the level count, not for physical values.
+        level_coords = np.array(sorted_levels, dtype=float)
+        if _level_type not in _VLEVEL_DIAG_SEEN:
+            _VLEVEL_DIAG_SEEN.add(_level_type)
+            logger.info(
+                "GRIB multi-level structure [%s]: typeOfLevel=%r n_levels=%d level_range=[%d, %d]",
+                path.name, _level_type, len(sorted_levels), sorted_levels[0], sorted_levels[-1],
             )
-        else:
-            level_coords = np.array(sorted_levels, dtype=float)
         return arr, level_coords
 
     return arr, None
@@ -537,7 +574,7 @@ def _build_grid_wind_cache(
     horizons: list[int],
     ref_dt: datetime,
     tmpdir: Path,
-    level_indices: dict[int, int],
+    level_heights: np.ndarray,
     sample_indices: np.ndarray,
     n_lat: int,
     n_lon: int,
@@ -545,12 +582,15 @@ def _build_grid_wind_cache(
 ) -> GridWindCache:
     """Build a GridWindCache from U/V/T_2M/TD_2M GRIBs kept on disk in tmpdir.
 
+    level_heights is the model-level geometric height (m MSL) at each grid-sample point,
+    shape (n_levels, n_grid); U/V are interpolated onto the fixed MAMSL bands per point.
     Reads one horizon at a time and deletes each file immediately after extraction.
     Called by both IconCh1EpsCollector and IconCh2EpsCollector.
     """
     n_grid = len(sample_indices)
     n_horizons = len(horizons)
-    alt_m_order = sorted(ALTITUDE_TO_HPA.keys())
+    alt_m_order = ALTITUDE_TARGETS_M
+    targets_m = np.array(ALTITUDE_TARGETS_M, dtype=np.float64)
 
     # float16 storage — ws (km/h), wd (deg), rh (%) all fit float16 with far finer
     # resolution than the data warrants; halves resident grid memory. Stats are computed
@@ -585,12 +625,12 @@ def _build_grid_wind_cache(
                 dest.unlink(missing_ok=True)
 
         if u_grid is not None and v_grid is not None:
-            for alt_m in alt_m_order:
-                l_idx = level_indices.get(ALTITUDE_TO_HPA[alt_m])
-                if l_idx is None:
-                    continue
-                u = u_grid[:, l_idx, :].astype(np.float64)
-                v = v_grid[:, l_idx, :].astype(np.float64)
+            # Interpolate every member onto the MAMSL bands, then reduce across members.
+            u_alt = _interp_to_heights(u_grid, level_heights, targets_m)   # (M, T, n_grid)
+            v_alt = _interp_to_heights(v_grid, level_heights, targets_m)
+            for ai, alt_m in enumerate(alt_m_order):
+                u = u_alt[:, ai, :].astype(np.float64)
+                v = v_alt[:, ai, :].astype(np.float64)
                 speeds = np.sqrt(u ** 2 + v ** 2) * 3.6
                 dirs = (270.0 - np.degrees(np.arctan2(v, u))) % 360.0
                 rad = np.deg2rad(dirs)
@@ -655,7 +695,7 @@ class IconCh1EpsCollector(BaseCollector):
 
     async def _ensure_grid(self, tmpdir: Path) -> None:
         global _GRID_TREE, _GRID_LATS, _GRID_LONS
-        global _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON
+        global _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, _GRID_LEVEL_HEIGHTS
 
         if _GRID_TREE is not None:
             return
@@ -669,11 +709,14 @@ class IconCh1EpsCollector(BaseCollector):
             resp.raise_for_status()
             collection_meta = resp.json()
 
+        assets = collection_meta.get("assets", {})
         constants_url: str | None = None
-        for key, asset in collection_meta.get("assets", {}).items():
+        vertical_url: str | None = None
+        for key, asset in assets.items():
             if "horizontal_constants" in key.lower():
                 constants_url = asset.get("href")
-                break
+            elif "vertical_constants" in key.lower():
+                vertical_url = asset.get("href")
 
         if not constants_url:
             raise RuntimeError(
@@ -703,6 +746,22 @@ class IconCh1EpsCollector(BaseCollector):
         logger.info(
             "Grid sample indices computed: %d × %d = %d points",
             _GRID_N_LAT, _GRID_N_LON, len(_GRID_SAMPLE_INDICES),
+        )
+
+        # Model-level geometric heights (m MSL) from the static HHL vertical constants —
+        # the basis for interpolating altitude winds / the wind grid to fixed MAMSL bands.
+        if not vertical_url:
+            raise RuntimeError(
+                f"vertical_constants asset not found in collection {COLLECTION}"
+            )
+        vc_dest = tmpdir / "vertical_constants_ch1.grib2"
+        await self.download(vertical_url, str(vc_dest))
+        _GRID_LEVEL_HEIGHTS = _load_level_heights(vc_dest)
+        vc_dest.unlink(missing_ok=True)
+        logger.info(
+            "CH1 model-level heights: %d levels × %d points, MAMSL range [%.0f, %.0f]",
+            _GRID_LEVEL_HEIGHTS.shape[0], _GRID_LEVEL_HEIGHTS.shape[1],
+            float(np.nanmin(_GRID_LEVEL_HEIGHTS)), float(np.nanmax(_GRID_LEVEL_HEIGHTS)),
         )
 
     async def _fetch_stations(self) -> list[dict]:
@@ -771,19 +830,19 @@ class IconCh1EpsCollector(BaseCollector):
         self,
         ref_dt: datetime,
         tmpdir: Path,
-        level_indices: dict[int, int],
     ) -> None:
-        if _GRID_SAMPLE_INDICES is None:
-            logger.info("Grid sample indices not available; skipping CH1 grid collection")
+        if _GRID_SAMPLE_INDICES is None or _GRID_LEVEL_HEIGHTS is None:
+            logger.info("Grid sample indices / level heights not available; skipping CH1 grid collection")
             return
+        z_grid = _GRID_LEVEL_HEIGHTS[:, _GRID_SAMPLE_INDICES]
         cache = _build_grid_wind_cache(
-            HORIZONS, ref_dt, tmpdir, level_indices,
+            HORIZONS, ref_dt, tmpdir, z_grid,
             _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, "icon-ch1",
         )
         set_grid_wind_cache(cache)
         logger.info(
-            "CH1 GridWindCache set: %d × %d points, %d levels, %d frames, init_time=%s",
-            _GRID_N_LAT, _GRID_N_LON, len(ALTITUDE_TO_HPA), len(HORIZONS), ref_dt.isoformat(),
+            "CH1 GridWindCache set: %d × %d points, %d bands, %d frames, init_time=%s",
+            _GRID_N_LAT, _GRID_N_LON, len(ALTITUDE_TARGETS_M), len(HORIZONS), ref_dt.isoformat(),
         )
         thermal = _build_thermal_grid_cache(
             HORIZONS, ref_dt, tmpdir,
@@ -820,7 +879,7 @@ class IconCh1EpsCollector(BaseCollector):
 
             async with httpx.AsyncClient(timeout=300) as client:
 
-                level_hpa: np.ndarray | None = None
+                pres_level_nums: np.ndarray | None = None
                 u0_url = await _search_item_url(
                     client, cfg.meteoswiss.stac_base_url, COLLECTION, ref_dt, "U", HORIZONS[0]
                 )
@@ -828,15 +887,17 @@ class IconCh1EpsCollector(BaseCollector):
                     dest = tmpdir / "U_probe.grib2"
                     try:
                         await self.download(u0_url, str(dest))
-                        _, level_hpa = _read_grib2_eccodes(dest, extract_indices=np.array([0]))
+                        # Second return is the model-level numbers — used only to size the
+                        # pressure-var arrays; heights come from HHL (see _ensure_grid).
+                        _, pres_level_nums = _read_grib2_eccodes(dest, extract_indices=np.array([0]))
                     except Exception as exc:
                         logger.warning("Pressure level probe failed: %s", exc)
                     finally:
                         dest.unlink(missing_ok=True)
 
-                if level_hpa is None:
-                    logger.info("No pressure-level data for %s — skipping U/V/W", COLLECTION)
-                    level_hpa = np.array(sorted(ALTITUDE_TO_HPA.values(), reverse=True), dtype=float)
+                if pres_level_nums is None:
+                    logger.info("Model-level probe empty for %s — assuming 80 levels", COLLECTION)
+                    pres_level_nums = np.arange(1, 81, dtype=float)
 
                 has_pressure_levels = u0_url is not None
 
@@ -917,9 +978,11 @@ class IconCh1EpsCollector(BaseCollector):
                 return np.stack(steps, axis=0)
 
             def pres_array(var: str) -> np.ndarray:
+                # float32 so the stacked array matches the eccodes results and the height
+                # interpolation needs no float64 copy of the (H·M × levels × stations) block.
                 if not pres_tasks.get(var):
-                    return np.full((len(HORIZONS), _n_members, len(level_hpa), n_stations), np.nan)
-                nan_pres = np.full((_n_members, len(level_hpa), n_stations), np.nan)
+                    return np.full((len(HORIZONS), _n_members, len(pres_level_nums), n_stations), np.nan, dtype=np.float32)
+                nan_pres = np.full((_n_members, len(pres_level_nums), n_stations), np.nan, dtype=np.float32)
                 steps = []
                 for task in pres_tasks[var]:
                     r = task.result() if not task.cancelled() else None
@@ -941,6 +1004,12 @@ class IconCh1EpsCollector(BaseCollector):
             cin_ml = surf_array("CIN_ML")
             u_pl = pres_array("U");  v_pl = pres_array("V");  w_pl = pres_array("W")
 
+            # W's 3D files are the largest (~1.8 GB each) and nothing re-reads them from disk
+            # (only the in-memory w_pl above is used — the grid build reads U/V/T_2M/TD_2M).
+            # Delete them now so they don't linger in the GRIB cache; U/V stay for the grid.
+            for _wh in HORIZONS:
+                (tmpdir / f"W_{_wh:03d}.grib2").unlink(missing_ok=True)
+
             def deaccum(arr: np.ndarray) -> np.ndarray:
                 out = np.empty_like(arr)
                 for s in range(n_stations):
@@ -955,12 +1024,32 @@ class IconCh1EpsCollector(BaseCollector):
             t_c      = t_2m - 273.15
             pmsl_hpa = pmsl / 100.0
 
-            level_indices: dict[int, int] = _build_level_indices(level_hpa)
-            logger.info(
-                "CH1 level_indices (target_hpa→arr_idx): %s",
-                {k: v for k, v in sorted(level_indices.items())},
-            )
-            alt_m_order = sorted(ALTITUDE_TO_HPA.keys())
+            # Interpolate U/V/W from the ~80 model levels onto the fixed MAMSL bands, using
+            # each station's model-level heights (from HHL). Heights are static across
+            # horizons, so collapse (horizon, member) into one axis for a single vectorised
+            # interpolation per variable. Bands below a station's terrain come back NaN.
+            alt_m_order = ALTITUDE_TARGETS_M
+            targets_m = np.array(ALTITUDE_TARGETS_M, dtype=np.float64)
+            n_alt = len(alt_m_order)
+            if _GRID_LEVEL_HEIGHTS is not None and u_pl.shape[2] == _GRID_LEVEL_HEIGHTS.shape[0]:
+                z_stn = _GRID_LEVEL_HEIGHTS[:, station_flat_indices]          # (L, S)
+                _H, _M, _L, _S = u_pl.shape
+                def _to_alt(field: np.ndarray) -> np.ndarray:
+                    return _interp_to_heights(
+                        field.reshape(_H * _M, _L, _S), z_stn, targets_m
+                    ).reshape(_H, _M, n_alt, _S)
+                u_alt = _to_alt(u_pl);  v_alt = _to_alt(v_pl);  w_alt = _to_alt(w_pl)
+                logger.info("CH1 altitude winds: interpolated U/V/W to %d MAMSL bands", n_alt)
+            else:
+                _shp = (len(HORIZONS), _n_members, n_alt, n_stations)
+                u_alt = np.full(_shp, np.nan, dtype=np.float32)
+                v_alt = np.full(_shp, np.nan, dtype=np.float32)
+                w_alt = np.full(_shp, np.nan, dtype=np.float32)
+                logger.warning(
+                    "CH1 altitude winds: no level heights or level-count mismatch "
+                    "(pres levels=%s, heights=%s) — bands null",
+                    u_pl.shape[2], None if _GRID_LEVEL_HEIGHTS is None else _GRID_LEVEL_HEIGHTS.shape[0],
+                )
 
             for s_idx, station in enumerate(stations):
                 station_id = station["station_id"]
@@ -1006,16 +1095,11 @@ class IconCh1EpsCollector(BaseCollector):
                     ))
 
                     level_list: list[AltitudeWindLevel] = []
-                    for alt_m in alt_m_order:
-                        l_idx = level_indices.get(ALTITUDE_TO_HPA[alt_m])
-                        if l_idx is not None:
-                            pl_ws_ev, pl_wd_ev = _wind_ensemble_value(
-                                u_pl[h_idx, :, l_idx, s_idx], v_pl[h_idx, :, l_idx, s_idx]
-                            )
-                            pl_wv_ev = _to_ensemble_value(w_pl[h_idx, :, l_idx, s_idx])
-                        else:
-                            nan_ev = EnsembleValue(probable=None, min=None, max=None)
-                            pl_ws_ev = pl_wd_ev = pl_wv_ev = nan_ev
+                    for alt_idx, alt_m in enumerate(alt_m_order):
+                        pl_ws_ev, pl_wd_ev = _wind_ensemble_value(
+                            u_alt[h_idx, :, alt_idx, s_idx], v_alt[h_idx, :, alt_idx, s_idx]
+                        )
+                        pl_wv_ev = _to_ensemble_value(w_alt[h_idx, :, alt_idx, s_idx])
 
                         pl_ws_p, pl_ws_mn, pl_ws_mx = _ev_flat(pl_ws_ev, scale=3.6)
                         pl_wd_p, pl_wd_mn, pl_wd_mx = _ev_flat(pl_wd_ev)
@@ -1056,7 +1140,7 @@ class IconCh1EpsCollector(BaseCollector):
             # uvicorn for that whole window — /health included. eccodes (via cffi) and
             # numpy release the GIL, so the loop keeps serving while this runs.
             try:
-                await asyncio.to_thread(self.collect_grid, ref_dt, tmpdir, level_indices)
+                await asyncio.to_thread(self.collect_grid, ref_dt, tmpdir)
             except Exception:
                 logger.exception("Grid collection failed — station data unaffected")
 

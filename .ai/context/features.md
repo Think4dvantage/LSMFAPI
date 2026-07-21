@@ -1,6 +1,6 @@
 # Feature History & Backlog
 
-## Current Version: v0.3.5
+## Current Version: v0.3.6
 
 ### Shipped Milestones
 
@@ -14,6 +14,7 @@
 | v0.3.3 | Grid memory reduction: float16 grid storage, combined single-array grid store (no merge-on-read copy), `/grid` + `/thermal-grid` response budget cap. Peak RAM ~8–16 GB → ~2 GB |
 | v0.3.4 | eccodes stack pinned: `poetry.lock` committed, explicit `eccodeslib`, apt libeccodes and the conda CI step removed. Fixes the v0.3.3 PRD crash loop and turns CI green for the first time |
 | v0.3.5 | Grid build moved off the event loop (`asyncio.to_thread`) — the API stayed unreachable for the whole build (~8 min CH1, ~20 min CH2), ~1.5–2 h/day |
+| v0.3.6 | Altitude winds + wind-grid-at-altitude fixed: interpolate U/V/W to true MAMSL heights from HHL (EPS files are model levels with no pv, so pressure matching collapsed all bands onto one level). W files now deleted right after extraction (they filled ~200 GB); GRIB pool moved to a bigger disk via the PRD pipeline |
 
 ---
 
@@ -165,6 +166,32 @@ reader may observe a torn frame for a fraction of a second 8×/day — strictly 
 
 **Rule going forward**: never call a GRIB/numpy-heavy function directly from `async def`. See
 `04-constraints.md`.
+
+---
+
+## v0.3.6 — Altitude Winds via MAMSL Heights ✓ SHIPPED
+
+Root cause of the long-standing all-null altitude winds (and the wind grid being wrong at
+altitude): the EPS `U`/`V`/`W` files are ~80 `generalVerticalLayer` model levels with **no
+`pv`**, so the old pressure-mapping (`ALTITUDE_TO_HPA` → nearest level index) fell through to
+raw level numbers `[1..80]` and every altitude band collapsed onto index 79.
+
+- **HHL height interpolation** — `_ensure_grid` now also downloads the static
+  `vertical_constants_icon-ch{1,2}-eps.grib2` asset, extracts `HHL` (81 half-levels), and
+  caches full-level geometric heights per grid point (`_GRID_LEVEL_HEIGHTS`, float16). New
+  `_interp_to_heights()` linearly interpolates each member's U/V/W onto the nine fixed MAMSL
+  bands per point; bands below terrain resolve to null. Removed `ALTITUDE_TO_HPA`,
+  `_build_level_indices`, `_approx_hybrid_to_pressure_hpa`, and the `pv` handling.
+- **Same API contract** — still nine bands (500–5000 m); the wind grid still omits 800 m. Only
+  the values change (now correct and distinct per height).
+- **W retained + no longer leaks** — vertical wind (`vertical_wind`) is real data again; W
+  files (~1.8 GB each) are deleted immediately after their in-memory extraction so they stop
+  filling the container disk.
+- **CI guard** — the integration test now asserts altitude winds resolve to distinct,
+  ordered values, so the collapse bug cannot silently regress.
+
+Storage: the GRIB pool (~200 GB/run, dominated by the 3D U/V/W files) was relocated off `/`
+to a larger disk via the separate PRD pipeline repo (compose bind mount), not in this repo.
 
 ---
 

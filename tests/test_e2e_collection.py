@@ -48,15 +48,20 @@ def reset_state(monkeypatch):
     ch1_mod._GRID_SAMPLE_INDICES = None
     ch1_mod._GRID_N_LAT = 0
     ch1_mod._GRID_N_LON = 0
+    ch1_mod._GRID_LEVEL_HEIGHTS = None
 
     # Clear forecast caches so assertions are not fooled by a previous run
     db_cache._ch1_station_cache.clear()
     db_cache._ch2_station_cache.clear()
+    db_cache._ch1_altitude_winds_cache.clear()
+    db_cache._ch2_altitude_winds_cache.clear()
 
     yield
 
     db_cache._ch1_station_cache.clear()
     db_cache._ch2_station_cache.clear()
+    db_cache._ch1_altitude_winds_cache.clear()
+    db_cache._ch2_altitude_winds_cache.clear()
 
 
 @pytest.mark.integration
@@ -72,7 +77,8 @@ async def test_ch1_collects_interlaken(monkeypatch):
     from lsmfapi._eccodes import setup_definitions
     setup_definitions()
 
-    # Reduce download volume: 2 steps × 17 vars ≈ 40 GRIB files (~2–4 min)
+    # Reduce download volume: 2 steps × ~23 vars GRIB files, plus the static horizontal/
+    # vertical constants (the latter ~172 MB, for HHL model-level heights) (~2–4 min)
     monkeypatch.setattr(ch1_mod, "HORIZONS", _TEST_HORIZONS)
 
     collector = IconCh1EpsCollector()
@@ -97,3 +103,18 @@ async def test_ch1_collects_interlaken(monkeypatch):
     assert 0 <= first.wind_speed <= 200, f"implausible wind_speed (km/h): {first.wind_speed}"
     assert -40 <= first.temperature <= 50, f"implausible temperature (°C): {first.temperature}"
     assert 800 <= first.pressure_qff <= 1100, f"implausible QFF pressure (hPa): {first.pressure_qff}"
+
+    # Altitude winds must resolve to DISTINCT geometric heights, not collapse onto a single
+    # model level. The pre-fix bug mapped all 9 bands to the same array index (the EPS U/V/W
+    # files are generalVerticalLayer model levels with no pv, so pressure matching failed),
+    # yielding identical or all-null winds. This asserts the HHL height interpolation works.
+    aw = db_cache.get_station_altitude_winds("meteoswiss-INT")
+    assert aw is not None and aw.profiles, "altitude winds cache empty after collection"
+    levels0 = aw.profiles[0].levels
+    assert [lvl.level_m for lvl in levels0] == [500, 800, 1000, 1500, 2000, 2500, 3000, 4000, 5000]
+    speeds = [lvl.wind_speed for lvl in levels0 if lvl.wind_speed is not None]
+    assert len(speeds) >= 2, "altitude winds all null — model-level→height mapping failed"
+    assert len({round(s, 1) for s in speeds}) >= 2, (
+        "altitude winds identical across bands — levels collapsed onto one "
+        "(regression of the generalVerticalLayer index bug)"
+    )

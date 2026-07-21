@@ -1,3 +1,41 @@
+# Resume Notes — 2026-07-21
+
+## What Was Done This Session
+
+### Disk incident → v0.3.6 (altitude winds via MAMSL heights)
+
+**Trigger**: PRD filled `/` (450 GB). `docker system df -v` showed the `lsmfapi` container's
+**writable layer at 214 GB** — the `/tmp/lsmfapi_grib` GRIB cache, one 18:00Z cycle. Probing a
+`U_000.grib2` showed **1.84 GB per file**: `typeOfLevel='generalVerticalLayer'`, 80 model levels
+(1–80), **`pv present: False`**. The grid build deletes U/V per horizon but never W, so 121 W
+files (~1.8 GB each) lingered → the 200 GB. GRIB pool was moved off `/` to `/mnt/cache` via the
+**separate PRD pipeline repo** (bind mount `/mnt/cache/lsmfapi-grib` → `/tmp/lsmfapi_grib`) — not
+in this repo's compose.
+
+**Root cause of the long-standing all-null altitude winds** (confirmed same probe): no `pv` →
+`_approx_hybrid_to_pressure_hpa` never ran → `level_coords` fell to raw `[1..80]` →
+`_build_level_indices` mapped all 9 pressure targets to the top index **79**. Every altitude band
+(and the wind grid at every level) read one model level. See [[altitude-winds-hhl-fix]].
+
+**Fix shipped (v0.3.6)** — interpolate to true MAMSL height instead of pressure:
+- `vertical_constants_icon-ch{1,2}-eps.grib2` → `HHL` (81 half-levels, `generalVertical`,
+  per-gridpoint, ~172 MB CH1). `_ensure_grid` downloads it once and caches full-level heights
+  `_GRID_LEVEL_HEIGHTS` (float16, `z=0.5*(HHL[k]+HHL[k+1])`).
+- New `_interp_to_heights(field, level_heights, targets)` — per-column linear interp, NaN below
+  terrain. Unit-tested locally (identity + linear weight exact). Rewired station altitude winds
+  (CH1+CH2) and `_build_grid_wind_cache`. Removed `ALTITUDE_TO_HPA`, `_build_level_indices`,
+  `_approx_hybrid_to_pressure_hpa`, `pv` handling. `ALTITUDE_TARGETS_M` replaces the pressure map.
+- **W kept** (user wants vertical wind for thermals) but W files now deleted right after the
+  in-memory extraction so they don't leak. `pres_array` arrays made float32 (no interp copy).
+- Router `_VALID_GRID_LEVELS` now from `ALTITUDE_TARGETS_M`. Integration test asserts altitude
+  winds are distinct/ordered (guards the collapse regression).
+
+**Verification**: all files byte-compile; interp helper unit-tested. Linux/eccodes path verified
+via **CI** (adds a ~172 MB vertical-constants download; a real pass is `1 passed in ~250s+`) then
+PRD — see [[env-no-local-linux]]. Not yet pushed at time of writing.
+
+---
+
 # Resume Notes — 2026-07-16
 
 ## What Was Done This Session

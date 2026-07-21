@@ -221,13 +221,16 @@ Legend — Accum: field is accumulated from model start; must be de-accumulated 
 | Level of Free Convection | `LFC_ML` | no | m — onset of free convective lift |
 | Turbulent Kinetic Energy | `TKE` | no | J/kg — boundary-layer turbulence measure |
 
-#### Pressure-level / 3D fields (typeOfLevel = isobaricInhPa)
+#### Model-level / 3D fields (typeOfLevel = generalVerticalLayer, ~80 model levels, no pv)
+
+Each file is large (~1.8 GB: ~80 levels × ~10 members × 1.1 M points). Heights come from the
+static HHL constants (see Altitude Level Mapping), not from any pressure coordinate.
 
 | Physical variable | ICON name | Notes |
 |---|---|---|
-| Wind U-component | `U` | → compute speed + direction |
+| Wind U-component | `U` | → interpolate to MAMSL, compute speed + direction |
 | Wind V-component | `V` | |
-| Vertical wind speed | `W` | m/s; positive = updraft |
+| Vertical wind speed | `W` | m/s; positive = updraft. W files are deleted right after their in-memory extraction (nothing re-reads them) so they don't fill the GRIB cache disk |
 
 #### De-accumulation
 
@@ -335,19 +338,26 @@ definitions path must sit inside `site-packages/eccodeslib/`. If it reads
 
 ---
 
-## Altitude Level Mapping
+## Altitude Level Mapping — geometric height (MAMSL), not pressure
 
-| Altitude (m ASL) | Pressure (hPa) |
-|---|---|
-| 500 | 950 |
-| 800 | 920 |
-| 1000 | 900 |
-| 1500 | 850 |
-| 2000 | 800 |
-| 2500 | 750 |
-| 3000 | 700 |
-| 4000 | 600 |
-| 5000 | 500 |
+Altitude winds and the wind grid are reported at nine fixed geometric heights above mean
+sea level: **500, 800, 1000, 1500, 2000, 2500, 3000, 4000, 5000 m** (`ALTITUDE_TARGETS_M`).
+The wind grid uses these minus the 800 m band.
+
+**How the mapping works.** The EPS `U`/`V`/`W` files are delivered on ~80 native ICON
+**model levels** (`typeOfLevel = generalVerticalLayer`, levels 1–80) with **no `pv`
+coordinate** — so pressure is *not* recoverable from them. Geometric height instead comes
+from the static **HHL** (height of half-levels) field in the collection's
+`vertical_constants_icon-ch{1,2}-eps.grib2` asset (81 half-levels → 80 full-level heights per
+grid point, computed once in `_ensure_grid` and cached as `_GRID_LEVEL_HEIGHTS`, float16).
+`_interp_to_heights()` linearly interpolates each member's winds onto the nine target heights
+per grid point; a band below a point's terrain resolves to null.
+
+> **History**: earlier versions mapped each MAMSL band to a pressure level and then to the
+> nearest model-level index. Because the files carry no `pv`, the pressure conversion silently
+> fell through to raw level numbers `[1..80]`, and every band collapsed onto index 79 —
+> all-null / identical altitude winds and a wind grid that was identical at every level. Fixed
+> in v0.3.6 by switching to HHL height interpolation.
 
 ---
 

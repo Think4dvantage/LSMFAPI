@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from lsmfapi.collectors.icon_ch1_eps import (
-    ALTITUDE_TO_HPA,
+    ALTITUDE_TARGETS_M,
     GRID_LAT_MAX,
     GRID_LAT_MIN,
     GRID_LON_MAX,
@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/forecast", tags=["forecast"])
 
-# Accepted parameter sets for the grid endpoint
-_VALID_GRID_LEVELS: frozenset[int] = frozenset(ALTITUDE_TO_HPA.keys()) - {800}
+# Accepted parameter sets for the grid endpoint (MAMSL bands; 800 m band omitted for the grid)
+_VALID_GRID_LEVELS: frozenset[int] = frozenset(ALTITUDE_TARGETS_M) - {800}
 _VALID_STRIDE_KM: frozenset[int] = frozenset({1, 2, 5, 10})
 
 # ICON-CH1 domain envelope used for bbox validation
