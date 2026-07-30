@@ -939,6 +939,28 @@ per-subclass collector modules or in code paths this particular test doesn't exe
 fix lands, and the actual CI run is the only real proof (see the next entry, if this session
 continues far enough to confirm it, or check `gh run list` in the next session if not).
 
+### v0.3.40 — P2-10 finally implemented (decision made early, task never scheduled)
+
+**Found during the end-of-session doc sync**: P2-10 was one of the 7 open decisions resolved
+with the user right at the start of implementation ("Stop creating tables until v0.4 starts
+(Recommended)") — but when the 26-item task list was built immediately afterward, P2-10 never
+got its own task and was never actually implemented. `init_db()` was still importing
+`database/models.py` and calling `Base.metadata.create_all()` every boot, creating two empty
+`recipes`/`recipe_rules` tables for a v0.4 feature that hasn't started and has no endpoints
+querying them — exactly the finding the plan described, still live.
+
+**Fix**: removed the `import lsmfapi.database.models` and `Base.metadata.create_all(_engine)`
+calls from `init_db()`. Confirmed via grep first that `Recipe`/`RecipeRule` have zero
+references anywhere outside `models.py` itself (no endpoints, no queries — matches the
+original audit). `database/models.py` is untouched — still the intended v0.4 blueprint; re-add
+the import + `create_all()` call in `init_db()` when that work actually starts. `check_db()`'s
+`SELECT 1` health check doesn't depend on any table existing, so `/health` is unaffected. The
+DB-path issue (CWD-relative, not on the persisted volume) is now moot since no tables are
+created — noted in `architecture.md` to revisit only once v0.4 actually writes real data.
+
+**Verify**: `py_compile`/`ruff check .` clean; on next deploy, confirm no `recipes.db` schema
+gets created and `/health`'s `sqlite: ok` check still passes.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

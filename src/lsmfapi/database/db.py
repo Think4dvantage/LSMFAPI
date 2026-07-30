@@ -14,12 +14,13 @@ class Base(DeclarativeBase):
 
 
 def init_db() -> None:
+    # Recipe/RecipeRule (database/models.py) are the v0.4 blueprint — not started, no
+    # endpoint queries them. Not importing the models module or calling create_all() means
+    # no tables are created until that work actually begins (P2-10 decision).
     global _engine, SessionLocal
-    import lsmfapi.database.models  # noqa: F401 — registers ORM models with Base metadata
 
     _engine = create_engine("sqlite:///lsmfapi.db", connect_args={"check_same_thread": False})
     SessionLocal = sessionmaker(bind=_engine)
-    Base.metadata.create_all(_engine)
     _run_column_migrations()
     logger.info("Database initialised")
 
