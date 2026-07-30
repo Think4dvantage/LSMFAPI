@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
+    # Deliberate and load-bearing (see 04-constraints.md) — library version must stay
+    # >= definitions version, or ecCodes aborts the process with no Python traceback.
+    # Bump these three together, by hand, behind a green integration test.
+    ignore:
+      - dependency-name: "eccodes"
+      - dependency-name: "eccodeslib"
+      - dependency-name: "eccodes-cosmo-resources-python"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

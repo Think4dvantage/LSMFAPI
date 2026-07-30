@@ -324,6 +324,20 @@ red until P2-6 lands in Group 6. **This does not gate releases**: `docker-publis
 **Verify**: CI shows the new `unit` job passing its ruff/lock/pytest steps except the
 pre-existing ruff findings (expected, tracked); `e2e` unaffected.
 
+### v0.3.20 — P3-3 dependabot
+
+**Finding**: `.github/` contained only `workflows/` — no `dependabot.yml`, no `renovate.json`.
+This repo's worst incident (v0.3.4) was unmanaged dependency drift; nothing was watching for
+it going forward.
+
+**Fix**: `.github/dependabot.yml` — `pip` + `github-actions` ecosystems, weekly, each grouped
+into a single PR. `eccodes`/`eccodeslib`/`eccodes-cosmo-resources-python` explicitly excluded
+via `ignore:` — those three are deliberate and must move together by hand, behind a green
+integration test, never as an automatic PR.
+
+**Verify**: next scheduled dependabot run opens at most one grouped `pip` PR and one grouped
+`github-actions` PR, with no PR touching the eccodes triplet.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
