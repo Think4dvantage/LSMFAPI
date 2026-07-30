@@ -273,6 +273,57 @@ member is now correctly skipped instead of poisoning the result.
 **Verify** (pending PRD deploy/CI): the new `services/ensemble.py` unit test (P3-2) pins these
 three cases so the fix can't silently regress.
 
+### v0.3.19 — P3-2 unit tests + ruff
+
+**Finding**: one test function gated 3,450 lines of source, no lint (ruff configured in
+`pyproject.toml` but never installed, so `poetry run ruff check` couldn't run — this is why
+the dead imports in P2-6 survived undetected), no fast test lane (every signal cost ~5 min and
+a 172 MB download).
+
+**Fix**:
+- New `unit` job in `integration-test.yml`, running on every push/PR: `poetry install --with
+  dev`, `ruff check .`, `poetry check --lock`, `pytest -m "not integration"`. Genuinely fast —
+  no network, no GRIB.
+- `ruff = "^0.8"` added to the dev group. **Regenerated `poetry.lock` on this Windows dev box**
+  — normally forbidden territory for this repo (Poetry-on-Windows locking is the exact failure
+  class that dropped `eccodeslib` once, v0.3.4) — but done safely this time: resolved in an
+  *isolated scratch copy* first, diffed against the tracked lock, confirmed the **only** change
+  was the new `ruff` entries and the content-hash (every `eccodes`/`eccodeslib`/
+  `eccodes-cosmo-resources-python` pin byte-identical), *then* copied it over. The explicit
+  `eccodeslib` stanza in `pyproject.toml` is exactly what makes this safe — it doesn't depend
+  on which platform's wheel metadata Poetry's resolver happens to read.
+- New unit tests (all pure, verified locally where the module's own imports allow it —
+  `services/ensemble.py` and `database/cache.py` need no eccodes/scipy and were actually run
+  and passed on this box; `icon_ch1_eps.py`'s helpers and the forecast router import eccodes
+  transitively at module load, same as the existing integration test, so those are verified by
+  hand-checked reimplementations run against local numpy and will execute for the first time
+  in CI):
+  - `tests/test_ensemble.py` — `compute_stats` NaN-skipping, `compute_wind_direction_stats`
+    circular fix (P2-7) both wraparound and non-wraparound cases, NaN-safety.
+  - `tests/test_cache_persistence.py` — combined grid store horizon-slicing, dirty-flag
+    lifecycle (including proving an untouched grid's npz is *not* rewritten), and a full
+    save→wipe→load round trip on both grid files. This is the exact regression the plan
+    flagged: the store's `_meta` array is positional/unversioned, so a field reorder would
+    silently misinterpret a persisted cache with no error.
+  - `tests/test_collector_helpers.py` — `_interp_to_heights` (identity, linear-weight,
+    below-terrain-null, above-top-null, shape-mismatch-returns-all-NaN — the exact cases
+    `.ai/RESUME.md` had claimed were "unit-tested locally" for v0.3.6 but never committed),
+    `_deaccumulate`, `_compute_rh_from_td` (Magnus formula known-value + saturated + clipping),
+    `_latest_ref_dt` at three boundaries (exact 2h, 1s inside the guard — the precise edge that
+    caused the v0.3.1 data-loss bug — and the midnight day-wrap).
+  - `tests/test_forecast_router.py` — `_budget_error`/`_MAX_RESPONSE_CELLS` boundary math.
+
+**Known, not fixed here**: `ruff check .` currently reports ~84 pre-existing findings (46
+semicolon-joined statements, 29 unused variables — mostly the exact dead code P2-6 already
+enumerates, 6 unused imports, 3 misplaced imports, 1 ambiguous name), all in
+`icon_ch1_eps.py`/`icon_ch2_eps.py`/`db.py`. Left alone on purpose — fixing them here would be
+exactly P2-6's job and a much larger diff than "add the lint gate." The `unit` job will show
+red until P2-6 lands in Group 6. **This does not gate releases**: `docker-publish.yml`'s P3-1
+`test` job only runs `pytest -m integration`, independent of `unit`.
+
+**Verify**: CI shows the new `unit` job passing its ruff/lock/pytest steps except the
+pre-existing ruff findings (expected, tracked); `e2e` unaffected.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

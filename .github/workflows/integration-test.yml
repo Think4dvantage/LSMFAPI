@@ -7,6 +7,33 @@ on:
     branches: ["main"]
 
 jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install --with dev
+
+      - name: Lint (ruff check only — no reformat)
+        run: poetry run ruff check .
+
+      - name: Check poetry.lock is in sync with pyproject.toml
+        run: poetry check --lock
+
+      - name: Run unit tests (no network, seconds not minutes)
+        run: poetry run pytest -m "not integration" -v --tb=short
+
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 20
