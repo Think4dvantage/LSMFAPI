@@ -11,6 +11,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from lsmfapi.api.routers import dashboard, forecast
+from lsmfapi.config import get_config
 from lsmfapi.database import telemetry
 from lsmfapi.database.cache import cache_stats, load_cache, save_cache
 from lsmfapi.database.db import check_db, init_db
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI):
     global _scheduler
     from lsmfapi._eccodes import setup_definitions
     setup_definitions()
+    get_config()  # fail fast + log resolved values before anything else starts
     init_db()
     load_cache()
     _scheduler = CollectorScheduler()

@@ -199,6 +199,38 @@ built from this commit, since PRD is off-limits to direct changes.
 **Verify**: `git status` shows `config.yml` as untracked-but-present; `git log` for the file
 stops advancing.
 
+### v0.3.16 — P1-7 config is no longer silently wrong
+
+**Finding**: `config.py` had no `extra="forbid"`, so Pydantic v2's default `extra="ignore"`
+silently discarded unknown keys — the four dead `scheduler.*` keys (P1-6) were dropped on the
+floor with no error, and a typo (`base_ur1:`) would be equally silent. `get_config()` did a
+CWD-relative `yaml.safe_load(Path("config.yml").read_text())` with no existence check — a
+missing file raised a bare `FileNotFoundError` from inside a collector, caught by
+`scheduler.py`'s `mark_failed`, so **the service booted "healthy" with no config at all**.
+Nothing logged the resolved config, so an operator couldn't tell which Lenticularis URL was
+in use from the logs alone — directly relevant given P1-6's dev/prod mixup.
+
+**Fix**:
+- `model_config = ConfigDict(extra="forbid")` on `MeteoSwissConfig`, `LenticularisConfig`, and
+  `Config` — verified locally (no eccodes/Linux needed, pure pydantic): both the real
+  `config.yml` and `config.yml.example` still parse; an unknown top-level key and a typo'd
+  nested key are both now rejected with a `ValidationError`.
+- `get_config()` now resolves the absolute path, logs CRITICAL and raises `FileNotFoundError`
+  explicitly if missing (same exception type as before, but with an intentional log line and a
+  clear message instead of an accidental one from deep in a collector).
+- Every resolved non-secret key logged at INFO on first load: both `stac_base_url`s, both
+  collection IDs, `lenticularis.base_url`, `grib_cache_dir`.
+- `main.py`'s lifespan now calls `get_config()` explicitly, before `init_db()`/`load_cache()` —
+  fail-fast and the config log line both happen at the very start of startup, not whenever the
+  first collector/route happens to touch it.
+- **Order dependency respected**: this landed after P1-6 removed the dead `scheduler:` block
+  from the local `config.yml` — `extra="forbid"` would otherwise have broken startup on this
+  box's own config file.
+
+**Verify** (pending PRD deploy): startup log shows the `Config loaded from ...` line with all
+five values; deliberately introducing a typo'd key in `config.yml` now fails startup with a
+clear `ValidationError` instead of silently doing nothing.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
