@@ -578,6 +578,28 @@ byte-identical to before.
 **Verify** (CI): `poetry install` + integration test stays green with a smaller dependency
 tree; removes a large GRIB-adjacent chunk of the image and its attack surface.
 
+### v0.3.31 — P2-5 numpy cap relaxed (landed alone, per the plan)
+
+**Finding**: `numpy = "^1.26"` locked to `1.26.4` (Feb 2024) with **no dependency actually
+requiring `<2.0`** — `scipy` declares `numpy>=1.26.4,<2.7`, `eccodes`/`eccodes-cosmo-resources`
+declare no numpy bound at all. The ceiling came purely from Poetry's caret. Cost: real friction
+— 1.26.4 has no `cp313` wheel, which is exactly why `poetry install` fails on this dev box —
+and it makes `python = "^3.11"` (i.e. `<4.0`) a false advertisement, since only 3.11 has ever
+actually been exercised by CI.
+
+**Fix**: relaxed to `numpy = ">=1.26,<3"`. Regenerated `poetry.lock` the same verified way as
+P2-4/P3-2 (isolated scratch copy, diffed before applying). **The diff was empty except the
+content-hash** — Poetry's resolver kept the exact same `numpy==1.26.4` already in the lock
+rather than eagerly jumping to 2.x, since nothing forces an upgrade during a plain re-lock. So
+**this commit changes zero runtime behaviour today** — CI will still run against 1.26.4 exactly
+as before. What it does change: the ceiling is gone for whenever a numpy 2.x bump is actually
+proposed (dependabot or manual) — per the plan, **that must not be batched with anything else**
+either, since numpy 2.x changed several semantics and the integration test is the only thing
+that would catch a regression.
+
+**Verify** (CI): integration test stays green, confirming 1.26.4 still resolves and works
+identically — this change is a no-op today by design.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

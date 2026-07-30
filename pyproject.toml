@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "lsmfapi"
-version = "0.3.30"
+version = "0.3.31"
 description = "Lenticularis SwissMeteo Forecast API"
 authors = ["Raphael Eymann <r+claude@eymanns.ch>"]
 packages = [{include = "lsmfapi", from = "src"}]
@@ -21,7 +21,7 @@ eccodes = "^2.38"
 eccodeslib = {version = "^2.47", markers = "platform_system != 'Windows'"}
 eccodes-cosmo-resources-python = "^2.38"
 scipy = "^1.14"
-numpy = "^1.26"
+numpy = ">=1.26,<3"
 pyyaml = "^6.0"
 
 [tool.poetry.group.dev.dependencies]
