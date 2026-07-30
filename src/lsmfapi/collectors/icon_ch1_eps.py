@@ -110,9 +110,13 @@ async def _search_item_url(
     horizon_h: int,
     perturbed: bool = True,
 ) -> str | None:
+    # Closed interval (start == end): a run takes 1.5-2h and MeteoSwiss publishes
+    # continuously, so an open-ended "ref_dt/.." interval can match a newer run that
+    # appeared mid-collection, silently stitching two different model runs together.
+    ref_dt_str = ref_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
     payload = {
         "collections": [collection],
-        "forecast:reference_datetime": f"{ref_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}/..",
+        "forecast:reference_datetime": f"{ref_dt_str}/{ref_dt_str}",
         "forecast:variable": variable,
         "forecast:perturbed": perturbed,
         "forecast:horizon": _horizon_str(horizon_h),
@@ -125,6 +129,11 @@ async def _search_item_url(
     assets = features[0].get("assets") or {}
     if not assets:
         return None
+    if len(assets) > 1:
+        logger.warning(
+            "STAC search %s h=%d ref=%s returned %d assets, expected 1 — using the first",
+            variable, horizon_h, ref_dt_str, len(assets),
+        )
     return next(iter(assets.values())).get("href")
 
 

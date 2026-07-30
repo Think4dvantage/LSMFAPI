@@ -600,6 +600,25 @@ that would catch a regression.
 **Verify** (CI): integration test stays green, confirming 1.26.4 still resolves and works
 identically — this change is a no-op today by design.
 
+### v0.3.32 — P1-10 STAC search can no longer stitch two model runs together
+
+**Finding**: `_search_item_url` sent an **open-ended** `forecast:reference_datetime` interval
+(`f"{ref_dt}/.."`) and took `features[0]` with no `sortby` — feature order is server-defined.
+A collection run takes 1.5–2h and MeteoSwiss publishes continuously, so if a newer run appears
+mid-collection, later horizons could resolve to a **different `ref_dt`** than the one stamped
+into the response's `init_time` — a silently mixed-run forecast. Also picked an arbitrary asset
+via `next(iter(assets.values()))` with no signal if more than one came back.
+
+**Fix**: closed interval (`ref_dt/ref_dt`) so only the intended run can match. Kept the reordering
+as a re-usable `ref_dt_str` local rather than duplicating `strftime`. Added a WARNING log when
+a search returns more than one asset (unexpected — would previously fail silently either way).
+Both CH1 and CH2 share this function (CH2 imports it from `icon_ch1_eps.py`), so one fix covers
+both collectors.
+
+**Verify** (CI/PRD): no behavioural change expected in the common case (one run, one asset);
+watch for the new WARNING log line if MeteoSwiss's STAC catalog ever does return >1 asset for
+a single (variable, horizon, ref_dt) query.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
