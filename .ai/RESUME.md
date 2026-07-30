@@ -777,6 +777,76 @@ per-station level (once per station, after all horizons), not per-horizon. `py_c
 to before (pure refactor), and the web UI should stay reachable through the parse-heavy window
 that previously ran inline.
 
+### v0.3.37 — P3-5, the largest change in the plan: shared IconEpsCollector base class
+
+**Finding**: `icon_ch2_eps.py` was 81% verbatim duplicate of `icon_ch1_eps.py` (measured by
+the original audit) — `_fetch_stations` byte-identical, `_ensure_grid`/`_fetch_step`/
+`collect_grid` differing only in log text and model strings. The drift this caused was
+already visible elsewhere this session: CH2's missing "no asset found" warning (fixed in
+P3-9), the two different deaccumulation implementations (P1-11), `pres_tasks.get(var)` vs
+`pres_tasks[var]`.
+
+**Approach**: delegated to a subagent with an exhaustive brief (every known CH1/CH2 parameter
+difference enumerated up front, every P0–P3 fix shipped today listed as a "must survive"
+marker, all three test files' monkeypatch requirements spelled out), explicitly framed as a
+**pure, behavior-preserving refactor — zero logic changes**. Then independently re-verified
+essentially the entire result myself before accepting it, given this is the single riskiest
+change of the whole remediation pass and zero-eccodes-locally means the only real proof is CI.
+
+**What shipped**: new `collectors/_icon_eps_base.py` (1248 lines) holds everything that was
+truly identical — STAC search (`_search_item_url`, closed-interval fix intact), the eccodes
+readers (`_read_grib2_eccodes` with the perturbationNumber-fallback counter intact),
+`_build_grid_wind_cache`/`_build_thermal_grid_cache` (the `*_baseline_ok` gap-handling and
+all-NaN `errstate` guards intact), and `IconEpsCollectorBase` holding `_fetch_stations`,
+`_fetch_step` (the `delete_after_read`/`asyncio.to_thread` fixes intact), and the full
+`collect()` orchestration (the `_build_and_cache_stations`-via-`to_thread` fix intact, the
+`_get_prior`/`_prior_fallback` NaN+telemetry behavior intact). `icon_ch1_eps.py` (1227→209
+lines) and `icon_ch2_eps.py` (585→188 lines) become thin subclasses setting class attributes:
+`COLLECTION`, `MODEL_TAG` ("ch1"/"ch2" — telemetry/collection_state key), `MODEL_NAME`
+("icon-ch1"/"icon-ch2" — stamped into responses), `ACCUM_PRIOR_H` (`None` for CH1, `33` for
+CH2 — the base class's `deaccum()` branches on this to pick the simple no-baseline path vs
+the shadow-fetch/`_get_prior` path, **byte-identical to the pre-refactor closures in each
+file, confirmed via `git show` diff against the prior commit**), `REF_DT_GUARD_HOURS`,
+`GRID_CONSTANTS_PREFIX`.
+
+**Two things kept deliberately per-subclass, not unified** (both load-bearing for existing
+tests, not just style):
+- `HORIZONS` is a `@property` returning the subclass module's own `HORIZONS` global, not a
+  plain class attribute — `test_e2e_collection.py` does
+  `monkeypatch.setattr(ch1_mod, "HORIZONS", [0, 6])` to shrink the CI run; a plain attribute
+  would snapshot the list at class-definition time and silently ignore the patch. Same
+  reasoning for `_cfg()` (returns `get_config()`, resolved via the subclass module's own
+  namespace so `monkeypatch.setattr(ch1_mod, "get_config", ...)` still works) and
+  `_compute_ref_dt()` (delegates to the subclass module's own standalone `_latest_ref_dt`/
+  `_latest_ref_dt_ch2`, which `test_collector_helpers.py` monkeypatches `datetime` on
+  directly — moving the guard logic into the base module would break that patch too).
+- Grid KD-tree/sample-indices/level-heights stay module-level singletons in each subclass
+  module (not base-class instance state) — CH1 and CH2 build genuinely different-resolution
+  grids, and `test_e2e_collection.py` resets them via `ch1_mod._GRID_TREE = None` direct
+  module-attribute access. `_ensure_grid`/`collect_grid` stay per-subclass for this reason;
+  the base class reaches the singletons through small accessor methods (`_grid_tree()`,
+  `_grid_level_heights()`) instead of owning them.
+
+**My own independent verification** (not just accepting the subagent's self-report):
+`py_compile` + `ruff check .` (0 findings, matching this repo's baseline since P2-6) re-run
+myself; read all 1248 lines of the new base module and both ~200-line subclasses in full;
+`git show HEAD:...` diffed the exact pre-refactor `deaccum` closures in both files against
+the new unified version — byte-identical logic in both the `ACCUM_PRIOR_H is None` and
+shadow-fetch branches; traced every monkeypatch in all three test files
+(`test_e2e_collection.py`, `test_collector_helpers.py`, `test_forecast_router.py`) against
+the new indirection layer by hand and confirmed each resolves the same way it did before;
+confirmed `BaseCollector` is a real `ABC` so the new `@abstractmethod`s on
+`IconEpsCollectorBase` are actually enforced, not just documentation; confirmed every
+external import site (`api/routers/forecast.py`, `api/routers/dashboard.py`,
+`scheduler.py`) still resolves through the re-export chain.
+
+**Verify** (CI is the only real proof — this is a pure refactor of code with zero local test
+coverage possible): the integration test should produce byte-identical station-cache content
+to before for Interlaken; the grid caches should populate identically; no new warnings; watch
+specifically for anything involving CH2's shadow h33 fetch or CH1's altitude-winds distinctness
+assertion, since those exercise the two branches that most changed shape (even though the
+underlying logic is unchanged).
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

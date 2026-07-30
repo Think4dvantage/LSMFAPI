@@ -1,14 +1,14 @@
-"""ICON-CH2-EPS collector — 30–120 h, 2 runs/day (00Z/12Z), 21 members.
+"""ICON-CH2-EPS collector — h34-h120 at 1h steps, 4 runs/day (00Z/06Z/12Z/18Z), 21 members.
 
-Identical logic to IconCh1EpsCollector; differs only in:
-  - Collection ID
-  - Member count (21)
-  - Horizon range (30 h … 120 h, 3-hour steps)
-  - Grid constants file
-  - Run cadence (00Z / 12Z only)
+Shares its STAC/GRIB/ensemble pipeline with IconCh1EpsCollector via
+IconEpsCollectorBase (see _icon_eps_base.py). This module keeps only what is genuinely
+CH2-specific: the collection id/horizon range/model-name/accumulation-baseline parameters,
+the module-level grid singletons (KD-tree, sample indices, model-level heights — CH1 and
+CH2 build different-resolution grids and existing tests reset these via direct
+module-attribute access), _ensure_grid/collect_grid (which own that state), and the
+standalone _latest_ref_dt_ch2 (imported by api/routers/dashboard.py).
 """
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,43 +17,21 @@ import httpx
 import numpy as np
 from scipy.spatial import cKDTree
 
-from lsmfapi.collectors.base import BaseCollector
-from lsmfapi.collectors.icon_ch1_eps import (
-    ACCUM_VARS,
+from lsmfapi.collectors._icon_eps_base import (
     ALTITUDE_TARGETS_M,
-    DOWNLOAD_CONCURRENCY,
     GRID_LAT_MAX,
     GRID_LAT_MIN,
     GRID_LON_MAX,
     GRID_LON_MIN,
     GRID_STEP_DEG,
-    PRESSURE_VARS,
-    SURFACE_VARS,
+    IconEpsCollectorBase,
     _build_grid_wind_cache,
     _build_thermal_grid_cache,
-    _compute_rh_from_td,
-    _ev_flat,
-    _interp_to_heights,
     _load_level_heights,
     _read_grid_coords,
-    _read_grib2_eccodes,
-    _search_item_url,
-    _to_ensemble_value,
-    _wind_ensemble_value,
 )
 from lsmfapi.config import get_config
-from lsmfapi.collectors.grib_cache import grib_run_dir
-from lsmfapi.database.cache import set_grid_wind_cache, set_station_altitude_winds, set_station_forecast, set_thermal_grid_cache
-from lsmfapi.database import collection_state as _cs
-from lsmfapi.database import telemetry as _telemetry
-from lsmfapi.models.forecast import (
-    AltitudeWindLevel,
-    AltitudeWindsProfile,
-    AltitudeWindsResponse,
-    EnsembleValue,
-    StationForecastHour,
-    StationForecastResponse,
-)
+from lsmfapi.database.cache import set_grid_wind_cache, set_thermal_grid_cache
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +41,7 @@ _GRID_SAMPLE_INDICES: np.ndarray | None = None
 _GRID_N_LAT: int = 0
 _GRID_N_LON: int = 0
 # Model-level geometric heights (m MSL) per CH2 grid point, from the static HHL constants.
-# Shape (n_full_levels, n_grid_points), float16. See icon_ch1_eps._load_level_heights.
+# Shape (n_full_levels, n_grid_points), float16. See _icon_eps_base._load_level_heights.
 _GRID_LEVEL_HEIGHTS: np.ndarray | None = None
 
 # ---------- Collection constants ----------
@@ -73,6 +51,7 @@ N_MEMBERS = 21  # informational only — actual count is read from each GRIB run
 HORIZONS = list(range(34, 121))
 # Shadow-fetch this step for accumulated vars to enable correct deaccumulation
 ACCUM_PRIOR_H = 33
+REF_DT_GUARD_HOURS = 3
 
 
 def _latest_ref_dt_ch2() -> datetime:
@@ -84,13 +63,38 @@ def _latest_ref_dt_ch2() -> datetime:
     now = datetime.now(timezone.utc)
     hour = (now.hour // 6) * 6
     candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if (now - candidate).total_seconds() < 3 * 3600:
+    if (now - candidate).total_seconds() < REF_DT_GUARD_HOURS * 3600:
         candidate -= timedelta(hours=6)
     return candidate
 
 
-class IconCh2EpsCollector(BaseCollector):
-    """ICON-CH2-EPS collector — h34–h120 at 1h steps, 4 runs/day (00Z/06Z/12Z/18Z), 21 members."""
+class IconCh2EpsCollector(IconEpsCollectorBase):
+    """ICON-CH2-EPS collector — h34-h120 at 1h steps, 4 runs/day (00Z/06Z/12Z/18Z), 21 members."""
+
+    COLLECTION = COLLECTION
+    MODEL_TAG = "ch2"
+    MODEL_NAME = "icon-ch2"
+    ACCUM_PRIOR_H = ACCUM_PRIOR_H
+    REF_DT_GUARD_HOURS = REF_DT_GUARD_HOURS
+    GRID_CONSTANTS_PREFIX = "ch2"
+    U_PROBE_FILENAME = "U_probe_ch2.grib2"
+    N_MEMBERS = N_MEMBERS
+
+    @property
+    def HORIZONS(self) -> list[int]:
+        return HORIZONS
+
+    def _cfg(self):
+        return get_config()
+
+    def _compute_ref_dt(self) -> datetime:
+        return _latest_ref_dt_ch2()
+
+    def _grid_tree(self):
+        return _GRID_TREE
+
+    def _grid_level_heights(self):
+        return _GRID_LEVEL_HEIGHTS
 
     async def _ensure_grid(self, tmpdir: Path) -> None:
         global _GRID_TREE, _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, _GRID_LEVEL_HEIGHTS
@@ -101,7 +105,7 @@ class IconCh2EpsCollector(BaseCollector):
         logger.info("Fetching collection metadata for CH2 grid constants")
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.get(
-                f"{cfg.meteoswiss.stac_base_url}/collections/{COLLECTION}"
+                f"{cfg.meteoswiss.stac_base_url}/collections/{self.COLLECTION}"
             )
             resp.raise_for_status()
             collection_meta = resp.json()
@@ -117,10 +121,10 @@ class IconCh2EpsCollector(BaseCollector):
 
         if not constants_url:
             raise RuntimeError(
-                f"horizontal_constants asset not found in collection {COLLECTION}"
+                f"horizontal_constants asset not found in collection {self.COLLECTION}"
             )
 
-        dest = tmpdir / "horizontal_constants_ch2.grib2"
+        dest = tmpdir / f"horizontal_constants_{self.GRID_CONSTANTS_PREFIX}.grib2"
         await self.download(constants_url, str(dest))
 
         lats, lons = _read_grid_coords(dest)
@@ -142,9 +146,9 @@ class IconCh2EpsCollector(BaseCollector):
         # Model-level geometric heights (m MSL) from the static HHL vertical constants.
         if not vertical_url:
             raise RuntimeError(
-                f"vertical_constants asset not found in collection {COLLECTION}"
+                f"vertical_constants asset not found in collection {self.COLLECTION}"
             )
-        vc_dest = tmpdir / "vertical_constants_ch2.grib2"
+        vc_dest = tmpdir / f"vertical_constants_{self.GRID_CONSTANTS_PREFIX}.grib2"
         await self.download(vertical_url, str(vc_dest))
         _GRID_LEVEL_HEIGHTS = _load_level_heights(vc_dest)
         vc_dest.unlink(missing_ok=True)
@@ -153,407 +157,6 @@ class IconCh2EpsCollector(BaseCollector):
             _GRID_LEVEL_HEIGHTS.shape[0], _GRID_LEVEL_HEIGHTS.shape[1],
             float(np.nanmin(_GRID_LEVEL_HEIGHTS)), float(np.nanmax(_GRID_LEVEL_HEIGHTS)),
         )
-
-    async def _fetch_stations(self) -> list[dict]:
-        cfg = get_config()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(f"{cfg.lenticularis.base_url}/api/stations")
-            resp.raise_for_status()
-            return resp.json()
-
-    async def _fetch_step(
-        self,
-        semaphore: asyncio.Semaphore,
-        client: httpx.AsyncClient,
-        ref_dt: datetime,
-        variable: str,
-        horizon_h: int,
-        station_flat_indices: np.ndarray,
-        tmpdir: Path,
-        delete_after_read: bool = False,
-    ) -> np.ndarray | None:
-        """delete_after_read=True for variables the grid build never reads (currently
-        just "W", ~1.8 GB/file) — see icon_ch1_eps.py's _fetch_step for the full rationale.
-        """
-        cfg = get_config()
-        async with semaphore:
-            try:
-                url = await _search_item_url(
-                    client, cfg.meteoswiss.stac_base_url, COLLECTION,
-                    ref_dt, variable, horizon_h,
-                )
-            except Exception as exc:
-                logger.error("CH2 STAC search error %s h=%d: %s", variable, horizon_h, exc)
-                _telemetry.record_download_error("ch2", variable, horizon_h, f"STAC search: {exc}")
-                return None
-
-            if url is None:
-                logger.warning("CH2 STAC: no asset found for %s h=%d — variable may not be published", variable, horizon_h)
-                return None
-
-            dest = tmpdir / f"{variable}_{horizon_h:03d}.grib2"
-            if dest.exists() and dest.stat().st_size > 1024:
-                logger.debug("CH2 GRIB cache hit: %s h=%d", variable, horizon_h)
-            else:
-                try:
-                    await self.download(url, str(dest))
-                except Exception as exc:
-                    logger.error("CH2 download failed %s h=%d: %s", variable, horizon_h, exc)
-                    _telemetry.record_download_error("ch2", variable, horizon_h, f"Download: {exc}")
-                    return None
-
-        try:
-            arr, _level_coords = await asyncio.to_thread(
-                _read_grib2_eccodes, dest, extract_indices=station_flat_indices,
-            )
-            if arr is None:
-                logger.warning("CH2 eccodes returned None for %s h=%d", variable, horizon_h)
-                return None
-            logger.debug("CH2 data %s h=%d shape=%s", variable, horizon_h, arr.shape)
-            return arr
-        except Exception as exc:
-            logger.error("CH2 eccodes read failed %s h=%d: %s — removing cached file", variable, horizon_h, exc)
-            dest.unlink(missing_ok=True)
-            _telemetry.record_download_error("ch2", variable, horizon_h, f"eccodes: {exc}")
-            return None
-        finally:
-            if delete_after_read:
-                dest.unlink(missing_ok=True)
-
-    async def collect(self) -> None:  # noqa: C901
-        ref_dt = _latest_ref_dt_ch2()
-        logger.info("IconCh2EpsCollector.collect() ref_dt=%s", ref_dt.isoformat())
-
-        with grib_run_dir("ch2", ref_dt) as tmpdir:
-
-            await self._ensure_grid(tmpdir)
-            stations = await self._fetch_stations()
-            if not stations:
-                logger.warning("No stations returned; skipping CH2 collection")
-                return
-
-            n_stations = len(stations)
-            station_lats = np.array([s["latitude"] for s in stations])
-            station_lons = np.array([s["longitude"] for s in stations])
-            station_coords = np.column_stack([station_lats, station_lons])
-            _, station_flat_indices = _GRID_TREE.query(station_coords)
-
-            semaphore = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
-            cfg = get_config()
-
-            async with httpx.AsyncClient(timeout=300) as client:
-
-                pres_level_nums: np.ndarray | None = None
-                u0_url = await _search_item_url(
-                    client, cfg.meteoswiss.stac_base_url, COLLECTION, ref_dt, "U", HORIZONS[0]
-                )
-                if u0_url:
-                    dest = tmpdir / "U_probe_ch2.grib2"
-                    try:
-                        await self.download(u0_url, str(dest))
-                        # Second return is the model-level numbers — used only to size the
-                        # pressure-var arrays; heights come from HHL (see _ensure_grid).
-                        _, pres_level_nums = _read_grib2_eccodes(dest, extract_indices=np.array([0]))
-                    except Exception as exc:
-                        logger.warning("CH2 pressure level probe failed: %s", exc)
-                    finally:
-                        dest.unlink(missing_ok=True)
-
-                if pres_level_nums is None:
-                    logger.info("CH2 model-level probe empty — assuming 80 levels")
-                    pres_level_nums = np.arange(1, 81, dtype=float)
-
-                has_pressure_levels = u0_url is not None
-
-                n_surf = len(SURFACE_VARS) * len(HORIZONS)
-                n_pres = len(PRESSURE_VARS) * len(HORIZONS) if has_pressure_levels else 0
-                progress = [0, 0, n_surf + n_pres]  # [done, ok, total]
-                _cs.mark_running("ch2", ref_dt, n_surf + n_pres)
-
-                async def fetch(var: str, h: int) -> np.ndarray | None:
-                    result: np.ndarray | None = None
-                    try:
-                        result = await self._fetch_step(
-                            semaphore, client, ref_dt, var, h, station_flat_indices, tmpdir,
-                            delete_after_read=(var == "W"),
-                        )
-                        return result
-                    finally:
-                        progress[0] += 1
-                        if result is not None:
-                            progress[1] += 1
-                        done, ok, total = progress
-                        _cs.mark_progress("ch2", done, ok)
-                        if done % 20 == 0 or done == total:
-                            logger.info("CH2 %d/%d ok=%d (%s h=%d)", done, total, ok, var, h)
-
-                # Shadow-fetch h33 for each accumulated variable — used only as the
-                # deaccumulation baseline so that the h34 delta is correct.
-                prior_tasks: dict[str, asyncio.Task] = {
-                    var: asyncio.ensure_future(
-                        self._fetch_step(
-                            semaphore, client, ref_dt, var, ACCUM_PRIOR_H,
-                            station_flat_indices, tmpdir,
-                        )
-                    )
-                    for var in ACCUM_VARS
-                }
-
-                surf_tasks: dict[str, list[asyncio.Task]] = {v: [] for v in SURFACE_VARS}
-                for var in SURFACE_VARS:
-                    for h in HORIZONS:
-                        surf_tasks[var].append(asyncio.ensure_future(fetch(var, h)))
-
-                pres_tasks: dict[str, list[asyncio.Task]] = {v: [] for v in PRESSURE_VARS}
-                if has_pressure_levels:
-                    for var in PRESSURE_VARS:
-                        for h in HORIZONS:
-                            pres_tasks[var].append(asyncio.ensure_future(fetch(var, h)))
-
-                all_tasks = list(prior_tasks.values())
-                all_tasks += [t for ts in surf_tasks.values() for t in ts]
-                all_tasks += [t for ts in pres_tasks.values() for t in ts]
-                await asyncio.gather(*all_tasks, return_exceptions=True)
-
-            def _task_ok(t: asyncio.Task) -> bool:
-                if t.cancelled():
-                    return False
-                try:
-                    return isinstance(t.result(), np.ndarray)
-                except Exception:
-                    return False
-
-            n_surf_ok = sum(1 for ts in surf_tasks.values() for t in ts if _task_ok(t))
-            n_surf_total = sum(len(ts) for ts in surf_tasks.values())
-            logger.info("CH2 surface fetch: %d/%d tasks returned data", n_surf_ok, n_surf_total)
-
-            # Member count is a property of the model run — read it from the data.
-            _n_members: int = next(
-                (
-                    t.result().shape[0]
-                    for ts in surf_tasks.values()
-                    for t in ts
-                    if _task_ok(t) and t.result().ndim == 2
-                ),
-                1,
-            )
-            logger.info("CH2 ensemble members in GRIB: %d", _n_members)
-
-            _nan_surf = np.full((_n_members, n_stations), np.nan)
-
-            def surf_array(var: str) -> np.ndarray:
-                steps = []
-                for task in surf_tasks[var]:
-                    r = task.result() if not task.cancelled() else None
-                    if isinstance(r, np.ndarray) and r.ndim == 3:
-                        r = r[:, -1, :]
-                    steps.append(
-                        r if isinstance(r, np.ndarray) and r.shape == _nan_surf.shape
-                        else _nan_surf
-                    )
-                return np.stack(steps, axis=0)
-
-            def pres_array(var: str) -> np.ndarray:
-                # float32 so the stacked array matches the eccodes results and the height
-                # interpolation needs no float64 copy of the (H·M × levels × stations) block.
-                if not pres_tasks[var]:
-                    return np.full((len(HORIZONS), _n_members, len(pres_level_nums), n_stations), np.nan, dtype=np.float32)
-                nan_pres = np.full((_n_members, len(pres_level_nums), n_stations), np.nan, dtype=np.float32)
-                steps = []
-                for task in pres_tasks[var]:
-                    r = task.result() if not task.cancelled() else None
-                    steps.append(
-                        r if isinstance(r, np.ndarray) and r.shape == nan_pres.shape
-                        else nan_pres
-                    )
-                return np.stack(steps, axis=0)
-
-            u_10m = surf_array("U_10M")
-            v_10m = surf_array("V_10M")
-            vmax_10m = surf_array("VMAX_10M")
-            t_2m = surf_array("T_2M")
-            td_2m = surf_array("TD_2M")
-            pmsl = surf_array("PMSL")
-            tot_prec = surf_array("TOT_PREC")
-            u_pl = pres_array("U")
-            v_pl = pres_array("V")
-            w_pl = pres_array("W")
-            # W's 3D files (~1.8 GB each) are now deleted per-horizon by _fetch_step's
-            # delete_after_read=True as soon as each is downloaded and station-extracted,
-            # instead of all HORIZONS worth lingering on disk until this point.
-
-            # NaN, not zero: if the h33 baseline fetch fails, the h34 delta must surface as
-            # missing data, not as the full 34-hour accumulation misread as a 1-hour rate
-            # (~34x too high for precipitation).
-            _prior_fallback = np.full((_n_members, n_stations), np.nan)
-
-            def _get_prior(var: str) -> np.ndarray:
-                t = prior_tasks.get(var)
-                if t is None or t.cancelled():
-                    logger.warning(
-                        "CH2 deaccumulation baseline missing for %s (h%d fetch missing/cancelled) "
-                        "— h%d delta will be null, not a wrong number",
-                        var, ACCUM_PRIOR_H, HORIZONS[0],
-                    )
-                    _telemetry.record_download_error("ch2", var, ACCUM_PRIOR_H, "prior fetch missing/cancelled")
-                    return _prior_fallback
-                try:
-                    r = t.result()
-                except Exception as exc:
-                    logger.warning("CH2 deaccumulation baseline fetch failed for %s: %s", var, exc)
-                    _telemetry.record_download_error("ch2", var, ACCUM_PRIOR_H, f"prior fetch failed: {exc}")
-                    return _prior_fallback
-                if isinstance(r, np.ndarray) and r.ndim == 3:
-                    r = r[:, -1, :]
-                if isinstance(r, np.ndarray) and r.shape == _prior_fallback.shape:
-                    return r
-                logger.warning("CH2 deaccumulation baseline for %s has an unexpected shape — using null fallback", var)
-                _telemetry.record_download_error("ch2", var, ACCUM_PRIOR_H, "prior fetch shape mismatch")
-                return _prior_fallback
-
-            def deaccum(arr: np.ndarray, var: str) -> np.ndarray:
-                prior = _get_prior(var)
-                out = np.empty_like(arr)
-                for s in range(n_stations):
-                    out[:, :, s] = np.diff(arr[:, :, s], axis=0, prepend=prior[:, s][np.newaxis, :])
-                return out
-
-            prec_rate = np.clip(deaccum(tot_prec, "TOT_PREC"), 0.0, None)
-            rh = _compute_rh_from_td(t_2m, td_2m)
-            t_c = t_2m - 273.15
-            pmsl_hpa = pmsl / 100.0
-
-            # Interpolate U/V/W from the ~80 model levels onto the fixed MAMSL bands using
-            # each station's model-level heights (from HHL). Heights are static across
-            # horizons, so collapse (horizon, member) into one axis for one vectorised
-            # interpolation per variable. Bands below a station's terrain come back NaN.
-            alt_m_order = ALTITUDE_TARGETS_M
-            targets_m = np.array(ALTITUDE_TARGETS_M, dtype=np.float64)
-            n_alt = len(alt_m_order)
-            if _GRID_LEVEL_HEIGHTS is not None and u_pl.shape[2] == _GRID_LEVEL_HEIGHTS.shape[0]:
-                z_stn = _GRID_LEVEL_HEIGHTS[:, station_flat_indices]          # (L, S)
-                _H, _M, _L, _S = u_pl.shape
-                def _to_alt(field: np.ndarray) -> np.ndarray:
-                    return _interp_to_heights(
-                        field.reshape(_H * _M, _L, _S), z_stn, targets_m
-                    ).reshape(_H, _M, n_alt, _S)
-                u_alt = _to_alt(u_pl)
-                v_alt = _to_alt(v_pl)
-                w_alt = _to_alt(w_pl)
-                logger.info("CH2 altitude winds: interpolated U/V/W to %d MAMSL bands", n_alt)
-            else:
-                _shp = (len(HORIZONS), _n_members, n_alt, n_stations)
-                u_alt = np.full(_shp, np.nan, dtype=np.float32)
-                v_alt = np.full(_shp, np.nan, dtype=np.float32)
-                w_alt = np.full(_shp, np.nan, dtype=np.float32)
-                logger.warning(
-                    "CH2 altitude winds: no level heights or level-count mismatch "
-                    "(pres levels=%s, heights=%s) — bands null",
-                    u_pl.shape[2], None if _GRID_LEVEL_HEIGHTS is None else _GRID_LEVEL_HEIGHTS.shape[0],
-                )
-
-            def _build_and_cache_stations() -> None:
-                """~8.7k StationForecastHour + ~78k AltitudeWindLevel Pydantic objects and
-                ~296k compute_stats calls for CH2 — real CPU time that would otherwise
-                block the event loop for its whole duration. Only the set_* calls touch
-                shared state (same rule as the v0.3.5 grid-build fix); every other local
-                here is built fresh per call.
-                """
-                for s_idx, station in enumerate(stations):
-                    station_id = station["station_id"]
-
-                    forecast_list: list[StationForecastHour] = []
-                    profiles_list: list[AltitudeWindsProfile] = []
-
-                    for h_idx, h in enumerate(HORIZONS):
-                        valid_time = ref_dt + timedelta(hours=h)
-
-                        def s(arr: np.ndarray) -> EnsembleValue:
-                            return _to_ensemble_value(arr[h_idx, :, s_idx])
-
-                        ws_ev, wd_ev = _wind_ensemble_value(
-                            u_10m[h_idx, :, s_idx], v_10m[h_idx, :, s_idx]
-                        )
-                        wg_ev = s(vmax_10m)
-                        t_ev  = s(t_c)
-                        rh_ev = s(rh)
-                        p_ev  = s(pmsl_hpa)
-                        pr_ev = s(prec_rate)
-
-                        ws_p, ws_mn, ws_mx = _ev_flat(ws_ev, scale=3.6)
-                        wg_p, wg_mn, wg_mx = _ev_flat(wg_ev, scale=3.6)
-                        wd_p, wd_mn, wd_mx = _ev_flat(wd_ev)
-                        t_p,  t_mn,  t_mx  = _ev_flat(t_ev)
-                        rh_p, rh_mn, rh_mx = _ev_flat(rh_ev)
-                        p_p,  p_mn,  p_mx  = _ev_flat(p_ev)
-                        pr_p, pr_mn, pr_mx = _ev_flat(pr_ev)
-
-                        forecast_list.append(StationForecastHour(
-                            valid_time=valid_time,
-                            wind_speed=ws_p, wind_speed_min=ws_mn, wind_speed_max=ws_mx,
-                            wind_gust=wg_p, wind_gust_min=wg_mn, wind_gust_max=wg_mx,
-                            wind_direction=wd_p, wind_direction_min=wd_mn, wind_direction_max=wd_mx,
-                            temperature=t_p, temperature_min=t_mn, temperature_max=t_mx,
-                            humidity=rh_p, humidity_min=rh_mn, humidity_max=rh_mx,
-                            pressure_qff=p_p, pressure_qff_min=p_mn, pressure_qff_max=p_mx,
-                            precipitation=pr_p, precipitation_min=pr_mn, precipitation_max=pr_mx,
-                        ))
-
-                        level_list: list[AltitudeWindLevel] = []
-                        for alt_idx, alt_m in enumerate(alt_m_order):
-                            pl_ws_ev, pl_wd_ev = _wind_ensemble_value(
-                                u_alt[h_idx, :, alt_idx, s_idx], v_alt[h_idx, :, alt_idx, s_idx]
-                            )
-                            pl_wv_ev = _to_ensemble_value(w_alt[h_idx, :, alt_idx, s_idx])
-
-                            pl_ws_p, pl_ws_mn, pl_ws_mx = _ev_flat(pl_ws_ev, scale=3.6)
-                            pl_wd_p, pl_wd_mn, pl_wd_mx = _ev_flat(pl_wd_ev)
-                            pl_wv_p, pl_wv_mn, pl_wv_mx = _ev_flat(pl_wv_ev)
-
-                            level_list.append(AltitudeWindLevel(
-                                level_m=alt_m,
-                                wind_speed=pl_ws_p, wind_speed_min=pl_ws_mn, wind_speed_max=pl_ws_mx,
-                                wind_direction=pl_wd_p, wind_direction_min=pl_wd_mn, wind_direction_max=pl_wd_mx,
-                                vertical_wind=pl_wv_p, vertical_wind_min=pl_wv_mn, vertical_wind_max=pl_wv_mx,
-                            ))
-                        profiles_list.append(AltitudeWindsProfile(valid_time=valid_time, levels=level_list))
-
-                    set_station_forecast(
-                        station_id,
-                        StationForecastResponse(
-                            station_id=station_id,
-                            init_time=ref_dt,
-                            model="icon-ch2",
-                            source="swissmeteo",
-                            forecast=forecast_list,
-                        ),
-                    )
-                    set_station_altitude_winds(
-                        station_id,
-                        AltitudeWindsResponse(
-                            station_id=station_id,
-                            init_time=ref_dt,
-                            model="icon-ch2",
-                            source="swissmeteo",
-                            profiles=profiles_list,
-                        ),
-                    )
-                    logger.info("CH2 cached forecast for %s (%d hours)", station_id, len(forecast_list))
-
-            await asyncio.to_thread(_build_and_cache_stations)
-
-            # Off the event loop — see the CH1 collector. CH2 spans 87 horizons
-            # (~2.6× CH1), so this blocks for ~20 min if run inline.
-            try:
-                await asyncio.to_thread(self.collect_grid, ref_dt, tmpdir)
-            except Exception as exc:
-                logger.exception("CH2 grid collection failed — station data unaffected")
-                # Not collection_state.mark_failed(): stations did succeed, and that would
-                # mislabel the whole run. Telemetry is what makes a no-grids run visible on
-                # the dashboard instead of reporting fully successful.
-                _telemetry.record_download_error("ch2", "grid", 0, str(exc))
-
-        logger.info("IconCh2EpsCollector.collect() complete — %d stations", len(stations))
 
     def collect_grid(
         self,
@@ -566,7 +169,7 @@ class IconCh2EpsCollector(BaseCollector):
         z_grid = _GRID_LEVEL_HEIGHTS[:, _GRID_SAMPLE_INDICES]
         cache = _build_grid_wind_cache(
             HORIZONS, ref_dt, tmpdir, z_grid,
-            _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, "icon-ch2",
+            _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, self.MODEL_NAME,
         )
         set_grid_wind_cache(cache)
         logger.info(
@@ -575,8 +178,8 @@ class IconCh2EpsCollector(BaseCollector):
         )
         thermal = _build_thermal_grid_cache(
             HORIZONS, ref_dt, tmpdir,
-            _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, "icon-ch2",
-            accum_prior_h=ACCUM_PRIOR_H,
+            _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, self.MODEL_NAME,
+            accum_prior_h=self.ACCUM_PRIOR_H,
         )
         set_thermal_grid_cache(thermal)
         logger.info(
