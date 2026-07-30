@@ -31,7 +31,7 @@ async def data_inspector_page() -> FileResponse:
 async def stations_proxy() -> list:
     """Proxy Lenticularis /api/stations so the browser avoids CORS."""
     cfg = get_config()
-    async with httpx.AsyncClient(timeout=10, verify=False) as client:
+    async with httpx.AsyncClient(timeout=10) as client:
         try:
             resp = await client.get(f"{cfg.lenticularis.base_url}/api/stations")
             resp.raise_for_status()

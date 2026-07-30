@@ -17,6 +17,7 @@
 | v0.3.6 | Altitude winds + wind-grid-at-altitude fixed: interpolate U/V/W to true MAMSL heights from HHL (EPS files are model levels with no pv, so pressure matching collapsed all bands onto one level). W files now deleted right after extraction (they filled ~200 GB); GRIB pool moved to a bigger disk via the PRD pipeline |
 | v0.3.7 | CH2 cron misfire fixed: `misfire_grace_time=1800` on both scheduler jobs — APScheduler's ~1s default was silently skipping CH2 triggers late by only a few seconds, leaving the cache stuck on a stale run for a full 6h cycle while CH1 kept updating normally |
 | v0.3.8 | Tech-debt remediation P0-1: stored XSS in the operator dashboard fixed — `escapeHtml()` applied to every server-data `innerHTML` interpolation in `dashboard.js`/`data.js`; `station_id` constrained to `[A-Za-z0-9_.-]{1,64}`; 404 no longer echoes raw input; telemetry sanitizes path/detail before storing |
+| v0.3.9 | Tech-debt remediation P0-2: `verify=False` removed from all 4 HTTPS clients (Lenticularis proxy, both collectors' `_fetch_stations`, `diag_interlaken.py`) — confirmed with the user that both hosts present valid public certs, so TLS verification was never actually needed |
 
 ---
 

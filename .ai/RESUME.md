@@ -30,6 +30,19 @@ before storing, so the error ring can never carry markup regardless of caller.
 it before it reaches the handler); open `/dashboard` and confirm error rows render literal text,
 never markup.
 
+### v0.3.9 — P0-2 TLS verification re-enabled on all HTTPS clients
+
+**Finding**: `verify=False` on 4 `httpx.AsyncClient` calls (Lenticularis proxy in
+`dashboard.py`, both collectors' `_fetch_stations`, `diag_interlaken.py`) — full MITM exposure
+on the calls that decide what the service collects. The MeteoSwiss clients were unaffected
+(they always verified correctly).
+
+**User confirmed** both `lenti.cloud` and any dev Lenticularis host present valid public certs
+— `verify=False` was never needed. Removed from all 4 sites, no CA-trust workaround required.
+
+**Verify** (pending deploy): a collection run completes normally and `/api/stations` still
+returns the full station list with verification on.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

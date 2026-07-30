@@ -158,7 +158,7 @@ class IconCh2EpsCollector(BaseCollector):
 
     async def _fetch_stations(self) -> list[dict]:
         cfg = get_config()
-        async with httpx.AsyncClient(timeout=30, verify=False) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(f"{cfg.lenticularis.base_url}/api/stations")
             resp.raise_for_status()
             return resp.json()

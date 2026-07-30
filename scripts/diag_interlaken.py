@@ -37,7 +37,7 @@ async def main() -> None:
     print()
 
     # Fetch station list
-    async with httpx.AsyncClient(timeout=30, verify=False) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(f"{cfg.lenticularis.base_url}/api/stations")
         resp.raise_for_status()
         stations = resp.json()
