@@ -373,6 +373,37 @@ only knew specific legacy filenames, not the `.tmp` pattern a partial write leav
 finds (INFO log per file) — a temp file present at boot is by definition an interrupted write.
 Deleting the existing PRD file is the user's call, not done here.
 
+### v0.3.23 — P2-6 dead code removed (84 → 4 ruff findings)
+
+Delegated to a subagent with the plan's exact P2-6 catalogue (each item to be re-verified via
+Grep, not trusted by line number, since earlier commits this session shifted things); reviewed
+its full diff myself before committing. Removed: 5 unused Pydantic response models in
+`models/forecast.py` (`GridPoint`/`GridFrame`/`GridForecastResponse`/`ThermalGridFrame`/
+`ThermalGridResponse`, ~76 lines — the hand-built-dict decision from v0.3.3 stands, these were
+just dead schema classes nothing constructed); `known_stations` unused import; `_parse_horizon_h`
++ `import re`; `_THERMAL_ACCUM_VARS`/`_THERMAL_SURFACE_VARS`; the `keep: bool = False` param on
+both collectors' `_fetch_step` (never passed non-default); `_GRID_LATS`/`_GRID_LONS` (written,
+never read); CH2's unused `_deaccumulate`/`_horizon_str` imports; per-collector unused locals
+from dead `surf_array`/`deaccum` calls (`clct`/`clcl`/`clcm`/`clch`/`hzerocl`/`cape_ml`/
+`cin_ml`/`dursun_min`/`solar_direct`/`solar_diffuse`/`lat`/`lon`/`elev` — each verified to
+appear exactly once in the pre-change file, i.e. genuinely dead, not silently relied on); plus
+two I found in my own review pass that weren't in the plan's exact list but are the same class
+of finding: `dashboard.py`'s dead `cached_init`/`cached_model` (also referencing a `"model"` key
+`station_cache_detail()` doesn't even return at that nesting level) and `grib_cache.py`'s
+unused `AbstractContextManager` import. Also split all 46 ruff-flagged semicolon-joined
+statements and fixed 1 ambiguous variable name (`l` → `lvl`). Fixed the two stale docstrings
+P2-6 called out: `GridWindCache`'s "(not persisted)" header (it's persisted since v0.3.3) and
+the `/grid`/`/thermal-grid` router docstrings, which still named the now-deleted response
+models — rewrote them to describe the actual plain-dict shape.
+
+`PRESSURE_VARS`/`CH1_PRESSURE_VARS` left alone as instructed — both identical `["U","V","W"]`
+lists but genuinely used from different places (CH1 uses `CH1_PRESSURE_VARS` internally, CH2
+imports and uses `PRESSURE_VARS`).
+
+**Verify**: `python -m py_compile` on all 7 touched files passes; `ruff check .` 84 → 4
+findings (remaining 4 all in `scripts/diag_interlaken.py`, which P3-6 deletes next); local
+pure-Python tests (`test_ensemble.py`, `test_cache_persistence.py`) still pass unaffected.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

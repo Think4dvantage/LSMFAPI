@@ -87,80 +87,6 @@ class AltitudeWindsResponse(BaseModel):
     profiles: list[AltitudeWindsProfile]
 
 
-# ---------- Grid forecast ----------
-
-class GridPoint(BaseModel):
-    lat: float
-    lon: float
-
-
-class GridFrame(BaseModel):
-    valid_time: datetime
-    ws: list[float | None]  # km/h, parallel to grid
-    wd: list[float | None]  # degrees, parallel to grid
-    rh: list[float | None]  # % surface relative humidity, parallel to grid
-
-
-class GridForecastResponse(BaseModel):
-    """GET /api/forecast/grid — errors: 400 bad params, 503 cache warming."""
-    init_time: datetime
-    model: str
-    stride_km: int
-    grid: list[GridPoint]
-    frames: list[GridFrame]
-
-
-# ---------- Thermal grid ----------
-
-class ThermalGridFrame(BaseModel):
-    valid_time: datetime
-    solar: list[float | None]               # W/m² total incoming solar — ensemble median
-    solar_min: list[float | None]
-    solar_max: list[float | None]
-    sunshine: list[float | None]            # min/h sunshine duration — ensemble median
-    sunshine_min: list[float | None]
-    sunshine_max: list[float | None]
-    cloud_cover: list[float | None]         # % total cloud cover — ensemble median
-    cloud_cover_min: list[float | None]
-    cloud_cover_max: list[float | None]
-    cloud_low: list[float | None]           # % low cloud — ensemble median
-    cloud_low_min: list[float | None]
-    cloud_low_max: list[float | None]
-    cloud_mid: list[float | None]           # % mid cloud — ensemble median
-    cloud_mid_min: list[float | None]
-    cloud_mid_max: list[float | None]
-    cloud_high: list[float | None]          # % high cloud — ensemble median
-    cloud_high_min: list[float | None]
-    cloud_high_max: list[float | None]
-    freezing_level: list[float | None]      # m ASL 0 °C isotherm — ensemble median
-    freezing_level_min: list[float | None]
-    freezing_level_max: list[float | None]
-    cape: list[float | None]                # J/kg mixed-layer CAPE — ensemble median
-    cape_min: list[float | None]
-    cape_max: list[float | None]
-    cin: list[float | None]                 # J/kg mixed-layer CIN (null = ICON fill) — ensemble median
-    cin_min: list[float | None]
-    cin_max: list[float | None]
-    lcl: list[float | None]                 # m lifted condensation level — ensemble median
-    lcl_min: list[float | None]
-    lcl_max: list[float | None]
-    lfc: list[float | None]                 # m level of free convection — ensemble median
-    lfc_min: list[float | None]
-    lfc_max: list[float | None]
-    tke: list[float | None]                 # J/kg turbulent kinetic energy — ensemble median
-    tke_min: list[float | None]
-    tke_max: list[float | None]
-
-
-class ThermalGridResponse(BaseModel):
-    """GET /api/forecast/thermal-grid — errors: 400 bad params, 503 cache warming."""
-    init_time: datetime
-    model: str
-    stride_km: int
-    grid: list[GridPoint]
-    frames: list[ThermalGridFrame]
-
-
 # ---------- Internal: thermal grid cache ----------
 
 @dataclass
@@ -218,7 +144,7 @@ class ThermalGridCache:
     tke_max: np.ndarray
 
 
-# ---------- Internal: grid wind cache (not persisted) ----------
+# ---------- Internal: grid wind cache ----------
 
 @dataclass
 class GridWindCache:

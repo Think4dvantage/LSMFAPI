@@ -11,7 +11,6 @@ Old runs (different ref_dt) are cleaned up when a new run starts.
 import contextlib
 import logging
 import shutil
-from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
 

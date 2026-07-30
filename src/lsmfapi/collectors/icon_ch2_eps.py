@@ -32,9 +32,7 @@ from lsmfapi.collectors.icon_ch1_eps import (
     _build_grid_wind_cache,
     _build_thermal_grid_cache,
     _compute_rh_from_td,
-    _deaccumulate,
     _ev_flat,
-    _horizon_str,
     _interp_to_heights,
     _load_level_heights,
     _read_grid_coords,
@@ -172,7 +170,6 @@ class IconCh2EpsCollector(BaseCollector):
         horizon_h: int,
         station_flat_indices: np.ndarray,
         tmpdir: Path,
-        keep: bool = False,
     ) -> np.ndarray | None:
         cfg = get_config()
         async with semaphore:
@@ -360,17 +357,16 @@ class IconCh2EpsCollector(BaseCollector):
                     )
                 return np.stack(steps, axis=0)
 
-            u_10m = surf_array("U_10M");  v_10m = surf_array("V_10M")
+            u_10m = surf_array("U_10M")
+            v_10m = surf_array("V_10M")
             vmax_10m = surf_array("VMAX_10M")
-            t_2m = surf_array("T_2M");    td_2m = surf_array("TD_2M")
+            t_2m = surf_array("T_2M")
+            td_2m = surf_array("TD_2M")
             pmsl = surf_array("PMSL")
-            tot_prec = surf_array("TOT_PREC");    dursun = surf_array("DURSUN")
-            aswdir_s = surf_array("ASWDIR_S");    aswdifd_s = surf_array("ASWDIFD_S")
-            clct = surf_array("CLCT");  clcl = surf_array("CLCL")
-            clcm = surf_array("CLCM");  clch = surf_array("CLCH")
-            hzerocl = surf_array("HZEROCL");      cape_ml = surf_array("CAPE_ML")
-            cin_ml = surf_array("CIN_ML")
-            u_pl = pres_array("U");  v_pl = pres_array("V");  w_pl = pres_array("W")
+            tot_prec = surf_array("TOT_PREC")
+            u_pl = pres_array("U")
+            v_pl = pres_array("V")
+            w_pl = pres_array("W")
 
             # W's 3D files are the largest (~1.8 GB each) and nothing re-reads them from disk
             # (the grid build reads U/V/T_2M/TD_2M). Delete now so they don't linger; U/V stay.
@@ -401,9 +397,6 @@ class IconCh2EpsCollector(BaseCollector):
                 return out
 
             prec_rate = np.clip(deaccum(tot_prec, "TOT_PREC"), 0.0, None)
-            dursun_min = np.clip(deaccum(dursun, "DURSUN") / 60.0, 0.0, None)
-            solar_direct = np.clip(deaccum(aswdir_s, "ASWDIR_S") / 3600.0, 0.0, None)
-            solar_diffuse = np.clip(deaccum(aswdifd_s, "ASWDIFD_S") / 3600.0, 0.0, None)
             rh = _compute_rh_from_td(t_2m, td_2m)
             t_c = t_2m - 273.15
             pmsl_hpa = pmsl / 100.0
@@ -422,7 +415,9 @@ class IconCh2EpsCollector(BaseCollector):
                     return _interp_to_heights(
                         field.reshape(_H * _M, _L, _S), z_stn, targets_m
                     ).reshape(_H, _M, n_alt, _S)
-                u_alt = _to_alt(u_pl);  v_alt = _to_alt(v_pl);  w_alt = _to_alt(w_pl)
+                u_alt = _to_alt(u_pl)
+                v_alt = _to_alt(v_pl)
+                w_alt = _to_alt(w_pl)
                 logger.info("CH2 altitude winds: interpolated U/V/W to %d MAMSL bands", n_alt)
             else:
                 _shp = (len(HORIZONS), _n_members, n_alt, n_stations)
@@ -437,9 +432,6 @@ class IconCh2EpsCollector(BaseCollector):
 
             for s_idx, station in enumerate(stations):
                 station_id = station["station_id"]
-                lat = float(station["latitude"])
-                lon = float(station["longitude"])
-                elev = int(station["elevation"]) if station.get("elevation") is not None else 0
 
                 forecast_list: list[StationForecastHour] = []
                 profiles_list: list[AltitudeWindsProfile] = []

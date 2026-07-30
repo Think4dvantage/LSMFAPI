@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import math
-import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,8 +31,6 @@ logger = logging.getLogger(__name__)
 
 # ---------- Module-level grid singleton (built once per process) ----------
 _GRID_TREE: cKDTree | None = None
-_GRID_LATS: np.ndarray | None = None   # all ICON-CH1 grid lats
-_GRID_LONS: np.ndarray | None = None   # all ICON-CH1 grid lons
 
 # Pre-sampled 1 km regular grid indices into _GRID_TREE for the default bbox
 _GRID_SAMPLE_INDICES: np.ndarray | None = None
@@ -89,17 +86,6 @@ DOWNLOAD_CONCURRENCY = 6
 
 def _horizon_str(h: int) -> str:
     return f"P0DT{h:02d}H00M00S"
-
-
-def _parse_horizon_h(s: str) -> int:
-    """Parse ISO 8601 duration → integer hours. Returns -1 on failure."""
-    m = re.match(r"P(\d+)DT(\d+)H", s)
-    if m:
-        return int(m.group(1)) * 24 + int(m.group(2))
-    m = re.match(r"PT(\d+)H", s)
-    if m:
-        return int(m.group(1))
-    return -1
 
 
 def _f(v: float | None, scale: float = 1.0) -> float | None:
@@ -352,7 +338,7 @@ def _read_grib2_eccodes(
     is_surface = len(sorted_levels) == 1
 
     member_idx = {m: i for i, m in enumerate(sorted_members)}
-    level_idx  = {l: i for i, l in enumerate(sorted_levels)}
+    level_idx  = {lvl: i for i, lvl in enumerate(sorted_levels)}
 
     n_out = len(extract_indices) if extract_indices is not None else n_points
     if is_surface:
@@ -404,12 +390,6 @@ def _read_grib2_eccodes(
 
 # ---------- Shared grid helper (used by CH1 and CH2 collectors) ----------
 
-_THERMAL_ACCUM_VARS: frozenset[str] = frozenset({"ASWDIR_S", "ASWDIFD_S", "DURSUN"})
-_THERMAL_SURFACE_VARS: list[str] = [
-    "ASWDIR_S", "ASWDIFD_S", "DURSUN",
-    "CLCT", "CLCL", "CLCM", "CLCH",
-    "HZEROCL", "CAPE_ML", "CIN_ML", "LCL_ML", "LFC_ML", "TKE",
-]
 _CIN_FILL_THRESHOLD = -900.0
 
 
@@ -439,18 +419,42 @@ def _build_thermal_grid_cache(
     # computed in float64 and only cast to float16 on store.
     _nan = lambda: np.full((n_horizons, n_grid), np.nan, dtype=np.float16)  # noqa: E731
 
-    solar_cache        = _nan(); solar_min_cache        = _nan(); solar_max_cache        = _nan()
-    sunshine_cache     = _nan(); sunshine_min_cache     = _nan(); sunshine_max_cache     = _nan()
-    cloud_cover_cache  = _nan(); cloud_cover_min_cache  = _nan(); cloud_cover_max_cache  = _nan()
-    cloud_low_cache    = _nan(); cloud_low_min_cache    = _nan(); cloud_low_max_cache    = _nan()
-    cloud_mid_cache    = _nan(); cloud_mid_min_cache    = _nan(); cloud_mid_max_cache    = _nan()
-    cloud_high_cache   = _nan(); cloud_high_min_cache   = _nan(); cloud_high_max_cache   = _nan()
-    freezing_level_cache = _nan(); freezing_level_min_cache = _nan(); freezing_level_max_cache = _nan()
-    cape_cache         = _nan(); cape_min_cache         = _nan(); cape_max_cache         = _nan()
-    cin_cache          = _nan(); cin_min_cache          = _nan(); cin_max_cache          = _nan()
-    lcl_cache          = _nan(); lcl_min_cache          = _nan(); lcl_max_cache          = _nan()
-    lfc_cache          = _nan(); lfc_min_cache          = _nan(); lfc_max_cache          = _nan()
-    tke_cache          = _nan(); tke_min_cache          = _nan(); tke_max_cache          = _nan()
+    solar_cache        = _nan()
+    solar_min_cache        = _nan()
+    solar_max_cache        = _nan()
+    sunshine_cache     = _nan()
+    sunshine_min_cache     = _nan()
+    sunshine_max_cache     = _nan()
+    cloud_cover_cache  = _nan()
+    cloud_cover_min_cache  = _nan()
+    cloud_cover_max_cache  = _nan()
+    cloud_low_cache    = _nan()
+    cloud_low_min_cache    = _nan()
+    cloud_low_max_cache    = _nan()
+    cloud_mid_cache    = _nan()
+    cloud_mid_min_cache    = _nan()
+    cloud_mid_max_cache    = _nan()
+    cloud_high_cache   = _nan()
+    cloud_high_min_cache   = _nan()
+    cloud_high_max_cache   = _nan()
+    freezing_level_cache = _nan()
+    freezing_level_min_cache = _nan()
+    freezing_level_max_cache = _nan()
+    cape_cache         = _nan()
+    cape_min_cache         = _nan()
+    cape_max_cache         = _nan()
+    cin_cache          = _nan()
+    cin_min_cache          = _nan()
+    cin_max_cache          = _nan()
+    lcl_cache          = _nan()
+    lcl_min_cache          = _nan()
+    lcl_max_cache          = _nan()
+    lfc_cache          = _nan()
+    lfc_min_cache          = _nan()
+    lfc_max_cache          = _nan()
+    tke_cache          = _nan()
+    tke_min_cache          = _nan()
+    tke_max_cache          = _nan()
 
     def _read(var: str, h: int) -> np.ndarray | None:
         dest = tmpdir / f"{var}_{h:03d}.grib2"
@@ -694,7 +698,7 @@ class IconCh1EpsCollector(BaseCollector):
     """ICON-CH1-EPS collector — 0–30 h, 4 runs/day (00Z/06Z/12Z/18Z), 11 members."""
 
     async def _ensure_grid(self, tmpdir: Path) -> None:
-        global _GRID_TREE, _GRID_LATS, _GRID_LONS
+        global _GRID_TREE
         global _GRID_SAMPLE_INDICES, _GRID_N_LAT, _GRID_N_LON, _GRID_LEVEL_HEIGHTS
 
         if _GRID_TREE is not None:
@@ -727,8 +731,6 @@ class IconCh1EpsCollector(BaseCollector):
         await self.download(constants_url, str(dest))
 
         lats, lons = _read_grid_coords(dest)
-        _GRID_LATS = lats
-        _GRID_LONS = lons
 
         flat_coords = np.column_stack([lats, lons])
         _GRID_TREE = cKDTree(flat_coords)
@@ -780,12 +782,8 @@ class IconCh1EpsCollector(BaseCollector):
         horizon_h: int,
         station_flat_indices: np.ndarray,
         tmpdir: Path,
-        keep: bool = False,
     ) -> np.ndarray | None:
-        """Download one (variable, horizon) GRIB, extract station values, return array.
-
-        keep=True skips deletion so the file can be re-read for grid extraction.
-        """
+        """Download one (variable, horizon) GRIB, extract station values, return array."""
         cfg = get_config()
         async with semaphore:
             try:
@@ -992,17 +990,16 @@ class IconCh1EpsCollector(BaseCollector):
                     )
                 return np.stack(steps, axis=0)
 
-            u_10m = surf_array("U_10M");   v_10m = surf_array("V_10M")
+            u_10m = surf_array("U_10M")
+            v_10m = surf_array("V_10M")
             vmax_10m = surf_array("VMAX_10M")
-            t_2m = surf_array("T_2M");     td_2m = surf_array("TD_2M")
+            t_2m = surf_array("T_2M")
+            td_2m = surf_array("TD_2M")
             pmsl = surf_array("PMSL")
-            tot_prec = surf_array("TOT_PREC");   dursun = surf_array("DURSUN")
-            aswdir_s = surf_array("ASWDIR_S");   aswdifd_s = surf_array("ASWDIFD_S")
-            clct = surf_array("CLCT");  clcl = surf_array("CLCL")
-            clcm = surf_array("CLCM");  clch = surf_array("CLCH")
-            hzerocl = surf_array("HZEROCL");     cape_ml = surf_array("CAPE_ML")
-            cin_ml = surf_array("CIN_ML")
-            u_pl = pres_array("U");  v_pl = pres_array("V");  w_pl = pres_array("W")
+            tot_prec = surf_array("TOT_PREC")
+            u_pl = pres_array("U")
+            v_pl = pres_array("V")
+            w_pl = pres_array("W")
 
             # W's 3D files are the largest (~1.8 GB each) and nothing re-reads them from disk
             # (only the in-memory w_pl above is used — the grid build reads U/V/T_2M/TD_2M).
@@ -1017,9 +1014,6 @@ class IconCh1EpsCollector(BaseCollector):
                 return out
 
             prec_rate    = np.clip(deaccum(tot_prec), 0.0, None)
-            dursun_min   = np.clip(deaccum(dursun) / 60.0, 0.0, None)
-            solar_direct = np.clip(deaccum(aswdir_s) / 3600.0, 0.0, None)
-            solar_diffuse = np.clip(deaccum(aswdifd_s) / 3600.0, 0.0, None)
             rh       = _compute_rh_from_td(t_2m, td_2m)
             t_c      = t_2m - 273.15
             pmsl_hpa = pmsl / 100.0
@@ -1038,7 +1032,9 @@ class IconCh1EpsCollector(BaseCollector):
                     return _interp_to_heights(
                         field.reshape(_H * _M, _L, _S), z_stn, targets_m
                     ).reshape(_H, _M, n_alt, _S)
-                u_alt = _to_alt(u_pl);  v_alt = _to_alt(v_pl);  w_alt = _to_alt(w_pl)
+                u_alt = _to_alt(u_pl)
+                v_alt = _to_alt(v_pl)
+                w_alt = _to_alt(w_pl)
                 logger.info("CH1 altitude winds: interpolated U/V/W to %d MAMSL bands", n_alt)
             else:
                 _shp = (len(HORIZONS), _n_members, n_alt, n_stations)
@@ -1053,9 +1049,6 @@ class IconCh1EpsCollector(BaseCollector):
 
             for s_idx, station in enumerate(stations):
                 station_id = station["station_id"]
-                lat  = float(station["latitude"])
-                lon  = float(station["longitude"])
-                elev = int(station["elevation"]) if station.get("elevation") is not None else 0
 
                 forecast_list: list[StationForecastHour] = []
                 profiles_list: list[AltitudeWindsProfile] = []

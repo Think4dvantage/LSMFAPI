@@ -53,9 +53,6 @@ async def dashboard_stats() -> dict:
     expected_ch1 = _latest_ref_dt().isoformat()
     expected_ch2 = _latest_ref_dt_ch2().isoformat()
 
-    cached_init = station.get("init_time")
-    cached_model = station.get("model", "")
-
     def _is_current(cached_init_iso: str | None, expected_iso: str) -> bool:
         if not cached_init_iso:
             return False

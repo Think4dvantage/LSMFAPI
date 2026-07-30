@@ -47,5 +47,5 @@ def get_db():
 
 def _run_column_migrations() -> None:
     """Add new columns to existing tables. Always idempotent — check PRAGMA table_info first."""
-    with _engine.connect() as conn:
+    with _engine.connect():
         pass  # No column migrations yet — tables are created fresh by create_all

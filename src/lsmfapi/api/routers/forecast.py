@@ -18,7 +18,6 @@ from lsmfapi.database.cache import (
     get_station_altitude_winds,
     get_station_forecast,
     get_thermal_grid_cache,
-    known_stations,
 )
 from lsmfapi.models.forecast import (
     AltitudeWindsResponse,
@@ -154,7 +153,8 @@ async def wind_grid(
     """Return gridded ICON-CH1 wind forecast for a bbox and altitude level.
 
     Params: level_m (int), bbox (str, default Switzerland), stride_km (int, default 10).
-    Response: GridForecastResponse — ws km/h, wd degrees, one frame per forecast hour.
+    Response: plain dict {init_time, model, stride_km, grid: [{lat, lon}], frames:
+    [{valid_time, ws, wd, rh}]} — ws km/h, wd degrees, rh %, one frame per forecast hour.
     Errors: 400 bad params, 503 cache warming.
     """
     if level_m not in _VALID_GRID_LEVELS:
@@ -254,7 +254,8 @@ async def thermal_grid(
     """Return gridded thermal forecast (solar, CAPE, CIN, cloud cover, freezing level, etc.).
 
     Params: bbox (str, default Switzerland), stride_km (int, default 10).
-    Response: ThermalGridResponse — one frame per forecast hour, values parallel to grid list.
+    Response: plain dict {init_time, model, stride_km, grid: [{lat, lon}], frames:
+    [{valid_time, <field>: [...]}]} — one frame per forecast hour, values parallel to grid list.
     All values are ensemble medians. NaN fields are returned as null.
     Errors: 400 bad params, 503 cache warming.
     """
