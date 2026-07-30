@@ -250,6 +250,29 @@ trade. This is this project's safety net for the riskier collector-internals wor
 **Verify**: next tag push shows the `test` job running before `build-and-push` starts; a
 deliberately failing test on a tag blocks the image from publishing.
 
+### v0.3.18 — P2-7 circular wind-direction min/max
+
+**Finding**: `services/ensemble.py`'s `compute_wind_direction_stats` used builtin `min()`/
+`max()` on a list of degrees, unlike `compute_stats` which correctly uses
+`np.nanmedian`/`nanmin`/`nanmax`. Two defects: builtin min/max isn't NaN-safe, and min/max of a
+circular quantity is meaningless — members at 359°/1° report a fake 358° spread instead of the
+true 2°, which for a paragliding tool is exactly the case that matters (wind direction crossing
+north).
+
+**User confirmed** (this changes API-visible values Lenticularis consumes): fix to circular
+statistics.
+
+**Fix**: `min`/`max` are now each member's offset from the circular `probable` (median),
+wrapped to `[-180°, 180°)` via `((angle − probable + 180) % 360) − 180`, taking `nanmin`/
+`nanmax` of the offsets, then re-adding to `probable` and wrapping back to `[0, 360)`.
+Verified locally (pure numpy, no eccodes needed): `[359°, 1°]` → `min=359°, max=1°` (true 2°
+spread, was 358°); `[80°, 100°, 120°]` (no wraparound) → unchanged `min=80°, max=120°`,
+confirming the fix generalizes the old behavior rather than replacing it outright; a NaN
+member is now correctly skipped instead of poisoning the result.
+
+**Verify** (pending PRD deploy/CI): the new `services/ensemble.py` unit test (P3-2) pins these
+three cases so the fix can't silently regress.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

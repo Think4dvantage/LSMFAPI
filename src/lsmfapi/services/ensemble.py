@@ -23,8 +23,13 @@ def compute_wind_direction_stats(angles_deg: list[float]) -> EnsembleStats:
     probable = float(
         np.rad2deg(np.arctan2(np.nanmedian(np.sin(rad)), np.nanmedian(np.cos(rad)))) % 360
     )
+    # Circular min/max: offset each member from the median (wrapped to [-180, 180)), then
+    # re-add the extremes to the median. Plain min()/max() on raw degrees is both not
+    # NaN-safe and meaningless for a circular quantity — members at 359°/1° would report
+    # a fake 358° spread instead of the true 2°.
+    offsets = (np.asarray(angles_deg, dtype=float) - probable + 180.0) % 360.0 - 180.0
     return EnsembleStats(
         probable=probable,
-        min=float(min(angles_deg)),
-        max=float(max(angles_deg)),
+        min=float((probable + np.nanmin(offsets)) % 360.0),
+        max=float((probable + np.nanmax(offsets)) % 360.0),
     )
