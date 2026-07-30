@@ -2,6 +2,34 @@
 
 ## What Was Done This Session
 
+### Tech-debt remediation plan
+
+A full audit of `src/`, `static/`, build/CI files plus live PRD inspection produced
+`specs/001-tech-debt-remediation/plan.md` — 23 findings (P0–P3), each with evidence, fix, and
+verification steps. User resolved the 7 open decisions that needed a human call (verify=False
+rationale, dashboard auth, non-root uid scope, circular wind stats, Recipe tables, arm64, dead
+script) and gave the go-ahead to implement the whole plan autonomously, sequencing group by
+group per the plan's own ordering. Working through it as one commit per item, versioned
+per item like every other fix in this project.
+
+### v0.3.8 — P0-1 stored XSS in the operator dashboard fixed
+
+**Finding**: request-controlled data (station_id echoed into 404 messages, request path recorded
+by telemetry) flowed unescaped into `dashboard.js`/`data.js` via `innerHTML`, reachable
+unauthenticated. See `specs/001-tech-debt-remediation/plan.md` P0-1 for the full chain.
+
+**Fix**: `escapeHtml()` added to both `dashboard.js` and `data.js`, applied at every sink that
+interpolates server data into an `innerHTML` template (`modelRows`, the errors table, the
+station `<option>` list). Defense in depth: `station_id` constrained to
+`pattern=r"^[A-Za-z0-9_.\-]+$", max_length=64` on both `/api/forecast/station` and
+`/api/forecast/altitude-winds`; the 404 body no longer echoes raw input (moved to a structured
+`details.station_id` field); `telemetry.record_error`/`record_download_error` now escape `<`/`>`
+before storing, so the error ring can never carry markup regardless of caller.
+
+**Verify** (pending PRD deploy): request `?station_id=<b>x</b>x`, confirm 422 (pattern rejects
+it before it reaches the handler); open `/dashboard` and confirm error rows render literal text,
+never markup.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
