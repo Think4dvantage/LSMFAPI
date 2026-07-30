@@ -657,6 +657,46 @@ fix and was never removed.
 the affected step(s) come back `null` with a WARNING log line and (for CH2) a telemetry entry,
 rather than a plausible-but-wrong number with no trace.
 
+### v0.3.34 — P3-9 silent failure paths
+
+Six findings from the plan's "silent failure paths that hide data loss" catalogue, six
+different fixes:
+
+1. **`_read` missing file** (thermal-grid builder, both CH1 and CH2 via the shared function) —
+   `if not dest.exists(): return None` had no log (only the exception branch did). Now logs
+   WARNING naming the variable/horizon before returning `None`.
+2. **CH2 missing STAC asset** — `if url is None: return None` was silent; CH1's equivalent
+   already warned (`"CH1 STAC: no asset found..."`). Added the matching CH2 log line.
+3. **Grid collection failure invisible to the dashboard** — both collectors' `collect_grid()`
+   call sites caught the exception and only `logger.exception`'d it. Added
+   `_telemetry.record_download_error(model, "grid", 0, str(exc))` alongside the existing log —
+   deliberately **not** `collection_state.mark_failed()`, since station data did succeed and
+   marking the whole run failed would be a worse lie than the one being fixed. Now a no-grids
+   run shows up in the dashboard's error panel instead of reporting fully successful.
+4. **`_eccodes_get`'s `perturbationNumber` fallback** — a read failure silently defaulted to
+   member 0, and multiple such defaults in one file would collapse distinct ensemble members
+   onto the same output row with no signal. Added a per-file counter: exactly one default is
+   expected (the control run, which genuinely has no `perturbationNumber`); more than one now
+   logs a WARNING naming the count.
+5. **`_deaccumulate`'s `prepend=arr[:1,:]*0`** — replaced with `np.zeros_like(arr[:1,:])`. The
+   old idiom turns `NaN*0` into `NaN` when the first step's data is missing, silently breaking
+   the intended "no prior accumulation" zero baseline. Verified locally (no eccodes needed —
+   pure numpy): a new test wraps `warnings.simplefilter("error")` around a NaN-first-step case
+   and confirms it still doesn't warn, while pinning the resulting NaN pattern
+   (`[NaN, NaN, 10.0]` — steps 0 and 1 are unavoidably NaN once step 0's data is missing;
+   step 2 onward is unaffected).
+6. **Left alone, deliberately**: `_fetch_step`'s `unlink()` in a `finally` after a parse
+   failure. The plan flagged this as 🔎 (reported, not fully verified) — and on inspection, it's
+   consistent with this project's own established, deliberate pattern (corrupt GRIB
+   self-deletes so it re-downloads next run, shipped in v0.3). Changing it without solid
+   evidence risks the opposite failure mode: a corrupt file that never gets cleaned up and
+   fails to parse identically on every subsequent run forever.
+
+**Verify** (CI/PRD): the new unit test (`test_deaccumulate_nan_first_step_does_not_warn`)
+passes; a deliberately missing GRIB file or STAC asset now produces a WARNING log line where
+previously there was none; a forced grid-collection exception now appears in the dashboard's
+error panel.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

@@ -5,6 +5,7 @@ itself imports eccodes/scipy at load time, so this file needs the full poetry en
 (same as the integration test), unlike test_ensemble.py / test_cache_persistence.py.
 """
 
+import warnings
 from datetime import datetime, timezone
 
 import numpy as np
@@ -51,6 +52,19 @@ def test_deaccumulate():
     arr = np.array([[10.0], [15.0], [25.0]])
     out = ch1_mod._deaccumulate(arr)
     np.testing.assert_allclose(out.ravel(), [10.0, 5.0, 10.0])
+
+
+def test_deaccumulate_nan_first_step_does_not_warn():
+    """arr[:1,:] * 0 turns NaN*0 into NaN, silently breaking the zero-baseline intent —
+    zeros_like must not multiply by the (possibly NaN) data at all, and must not warn.
+    """
+    arr = np.array([[np.nan], [15.0], [25.0]])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = ch1_mod._deaccumulate(arr)
+    assert np.isnan(out[0, 0])
+    assert np.isnan(out[1, 0])  # arr[1]-arr[0] with arr[0]=NaN is unavoidably NaN
+    assert out[2, 0] == 10.0  # unaffected — the NaN doesn't propagate past step 1
 
 
 def test_compute_rh_from_td_saturated_is_100_percent():

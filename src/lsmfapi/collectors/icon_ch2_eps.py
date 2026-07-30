@@ -184,6 +184,7 @@ class IconCh2EpsCollector(BaseCollector):
                 return None
 
             if url is None:
+                logger.warning("CH2 STAC: no asset found for %s h=%d — variable may not be published", variable, horizon_h)
                 return None
 
             dest = tmpdir / f"{variable}_{horizon_h:03d}.grib2"
@@ -528,8 +529,12 @@ class IconCh2EpsCollector(BaseCollector):
             # (~2.6× CH1), so this blocks for ~20 min if run inline.
             try:
                 await asyncio.to_thread(self.collect_grid, ref_dt, tmpdir)
-            except Exception:
+            except Exception as exc:
                 logger.exception("CH2 grid collection failed — station data unaffected")
+                # Not collection_state.mark_failed(): stations did succeed, and that would
+                # mislabel the whole run. Telemetry is what makes a no-grids run visible on
+                # the dashboard instead of reporting fully successful.
+                _telemetry.record_download_error("ch2", "grid", 0, str(exc))
 
         logger.info("IconCh2EpsCollector.collect() complete — %d stations", len(stations))
 

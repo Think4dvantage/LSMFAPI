@@ -149,7 +149,10 @@ def _latest_ref_dt() -> datetime:
 
 def _deaccumulate(arr: np.ndarray) -> np.ndarray:
     """Difference accumulated field along steps axis (axis=0)."""
-    return np.diff(arr, axis=0, prepend=arr[:1, :] * 0)
+    # zeros_like, not arr[:1, :] * 0 — a NaN in the first step (a failed fetch, see
+    # _nan_surf) makes "anything * 0" itself NaN, silently breaking the zero-baseline
+    # intent for that column.
+    return np.diff(arr, axis=0, prepend=np.zeros_like(arr[:1, :]))
 
 
 def _compute_rh_from_td(t_k: np.ndarray, td_k: np.ndarray) -> np.ndarray:
@@ -318,6 +321,7 @@ def _read_grib2_eccodes(
     unique_levels: set[int] = set()
     n_points: int = 0
     _level_type: str = ""
+    _pert_fallback_count = 0  # messages where perturbationNumber couldn't be read
 
     try:
         with open(str(path), "rb") as f:
@@ -326,7 +330,11 @@ def _read_grib2_eccodes(
                 if msg is None:
                     break
                 try:
-                    unique_members.add(int(_eccodes_get(msg, "perturbationNumber", default=0)))
+                    pert = _eccodes_get(msg, "perturbationNumber", default=None)
+                    if pert is None:
+                        _pert_fallback_count += 1
+                        pert = 0
+                    unique_members.add(int(pert))
                     unique_levels.add(int(_eccodes_get(msg, "level", default=0)))
                     if n_points == 0:
                         n_points = eccodes.codes_get_size(msg, "values")
@@ -341,6 +349,16 @@ def _read_grib2_eccodes(
     if not unique_members or n_points == 0:
         logger.warning("No GRIB2 messages in %s", path.name)
         return None, None
+
+    # Exactly one message defaulting to member 0 is the expected control run. More than
+    # one means perturbationNumber genuinely failed to read on real ensemble members,
+    # which would otherwise silently collapse them all onto the same output row.
+    if _pert_fallback_count > 1:
+        logger.warning(
+            "%s: perturbationNumber missing on %d messages (expected at most 1, for the "
+            "control run) — ensemble members may have collapsed",
+            path.name, _pert_fallback_count,
+        )
 
     sorted_members = sorted(unique_members)
     sorted_levels  = sorted(unique_levels)
@@ -468,6 +486,7 @@ def _build_thermal_grid_cache(
     def _read(var: str, h: int) -> np.ndarray | None:
         dest = tmpdir / f"{var}_{h:03d}.grib2"
         if not dest.exists():
+            logger.warning("ThermalGrid %s h=%d: file missing, treating as no data", var, h)
             return None
         try:
             arr, _ = _read_grib2_eccodes(dest, extract_indices=sample_indices)
@@ -1179,7 +1198,11 @@ class IconCh1EpsCollector(BaseCollector):
             # numpy release the GIL, so the loop keeps serving while this runs.
             try:
                 await asyncio.to_thread(self.collect_grid, ref_dt, tmpdir)
-            except Exception:
+            except Exception as exc:
                 logger.exception("Grid collection failed — station data unaffected")
+                # Not collection_state.mark_failed(): stations did succeed, and that would
+                # mislabel the whole run. Telemetry is what makes a no-grids run visible on
+                # the dashboard instead of reporting fully successful.
+                _telemetry.record_download_error("ch1", "grid", 0, str(exc))
 
         logger.info("IconCh1EpsCollector.collect() complete — %d stations", len(stations))
