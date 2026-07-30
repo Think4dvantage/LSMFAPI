@@ -561,6 +561,23 @@ No `.dockerignore` — build context shipped `.git/`, `.ai/`, `data/`, etc. on e
 **Verify** (CI): next build shows the pinned digest resolving without a re-pull warning;
 `poetry --version` in the build log reads exactly `2.2.1` everywhere; build context size drops.
 
+### v0.3.30 — P2-4 unused dependencies removed
+
+**Finding**: `cfgrib`, `xarray`, `aiofiles` — zero imports anywhere in `src/` (`cfgrib` appeared
+only in a docstring, now fixed to say "eccodes" instead). Collectors use the raw `eccodes` API
+directly, not `cfgrib`/`xarray`. `xarray` was additionally pinned `^2024.0` — a caret on a
+**CalVer** package permanently freezes it in calendar-2024, unable to ever receive a 2025+ fix.
+
+**Fix**: removed all three from `pyproject.toml`. `poetry.lock` regenerated the same verified
+way as P3-2's `ruff` addition — resolved in an isolated scratch copy first, diffed against the
+tracked lock before applying. Confirmed: only `cfgrib`/`xarray`/`aiofiles` and their
+transitive-only dependencies (`pandas`, `python-dateutil`, `pytz`, `six` — nothing else needed
+them) were removed; the `eccodes`/`eccodeslib`/`eccodes-cosmo-resources-python` versions are
+byte-identical to before.
+
+**Verify** (CI): `poetry install` + integration test stays green with a smaller dependency
+tree; removes a large GRIB-adjacent chunk of the image and its attack surface.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

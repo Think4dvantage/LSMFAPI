@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 def setup_definitions() -> None:
     """Register COSMO/ICON GRIB2 shortName definitions with ecCodes.
 
-    Must be called once at process startup before any cfgrib/xarray operations.
+    Must be called once at process startup before any eccodes GRIB2 parsing.
     COSMO definitions must appear before the vendor (ECMWF) definitions in the path
     so that ICON-specific shortNames (T_2M, U_10M, QV, PMSL …) are resolved correctly.
     """
