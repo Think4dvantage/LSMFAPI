@@ -15,20 +15,48 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
 
+from lsmfapi.config import get_config
+
 logger = logging.getLogger(__name__)
 
-_BASE = Path("/tmp/lsmfapi_grib")
+# Below this, a CH2 run (~480 GB peak, see architecture.md) risks exhausting the volume —
+# the same disk-full class of incident that already took the host down once (v0.3.6).
+_LOW_SPACE_THRESHOLD_GB = 550
+
+
+def _base_dir() -> Path:
+    return Path(get_config().grib_cache_dir)
+
+
+def log_startup_status() -> None:
+    """Log the resolved GRIB cache dir and warn if the volume is low on space."""
+    base = _base_dir()
+    base.mkdir(parents=True, exist_ok=True)
+    logger.info("GRIB cache dir: %s", base)
+    try:
+        free_gb = shutil.disk_usage(base).free / 1_073_741_824
+    except OSError:
+        logger.warning("Could not stat free space for GRIB cache dir %s", base)
+        return
+    if free_gb < _LOW_SPACE_THRESHOLD_GB:
+        logger.warning(
+            "GRIB cache volume has only %.1f GB free (below %d GB threshold) — "
+            "a CH2 run can peak at ~480 GB",
+            free_gb, _LOW_SPACE_THRESHOLD_GB,
+        )
+    else:
+        logger.info("GRIB cache volume free space: %.1f GB", free_gb)
 
 
 def _run_dir(model: str, ref_dt: datetime) -> Path:
-    d = _BASE / model / ref_dt.strftime("%Y%m%dT%H%MZ")
+    d = _base_dir() / model / ref_dt.strftime("%Y%m%dT%H%MZ")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _purge_stale(model: str, ref_dt: datetime) -> None:
     """Remove GRIB dirs from previous runs of this model."""
-    base = _BASE / model
+    base = _base_dir() / model
     if not base.exists():
         return
     current = ref_dt.strftime("%Y%m%dT%H%MZ")

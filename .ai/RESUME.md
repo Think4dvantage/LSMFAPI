@@ -152,6 +152,30 @@ no separate telemetry call needed in the handler itself.
 appears in `/api/dashboard`'s error panel and as an ERROR-level log line, where previously it
 appeared as neither.
 
+### v0.3.14 — P0-4.1 GRIB cache dir configurable + startup disk warning
+
+**Finding**: `grib_cache.py` hardcoded `_BASE = Path("/tmp/lsmfapi_grib")` with no config
+override, and neither compose file bind-mounted it — so DEV writes the same ~200/480 GB peak
+(see P0-4.2, still open) into the container's writable layer, exactly how the v0.3.6 disk-full
+incident started. This is the cheap, urgent half of P0-4; P0-4.2 (the actual peak-disk fix,
+same work as P1-4) is deferred to land alongside the single-pass GRIB extraction.
+
+**Fix**:
+- `grib_cache_dir` added to `Config`/`config.yml.example` (default `/tmp/lsmfapi_grib`, so
+  existing deployments are unaffected until they opt in). `grib_cache.py` now resolves the base
+  dir via `get_config()` instead of a module constant.
+- `CollectorScheduler.startup()` calls `grib_cache.log_startup_status()`: logs the resolved dir
+  and free space, WARNING below 550 GB (a CH2 run alone can peak at ~480 GB).
+- `docker-compose.yml` bind-mounts `./grib-cache:/tmp/lsmfapi_grib` (added to `.gitignore`) so
+  DEV stops filling the container layer regardless of the config value.
+- **Doc correction**: `RESUME.md`'s v0.3.6 entry and the matching `features.md` row overstated
+  the W-file fix — deletion runs *after* the whole download phase, so it bounds retention
+  between runs, not the in-run peak. Corrected both to say peak is still ~200/480 GB pending
+  P0-4.2.
+
+**Verify** (pending PRD deploy): startup log shows `GRIB cache dir: ...` and a free-space line;
+`du -sh` on the bind-mounted `./grib-cache` (not the container layer) grows during a run.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
@@ -235,7 +259,11 @@ proven against real ICON GRIB. The test adds a ~172 MB vertical-constants downlo
 - log lines `CH1 model-level heights: 80 levels × 1147980 points, MAMSL range [...]` and
   `CH1/CH2 altitude winds: interpolated U/V/W to 9 MAMSL bands`;
 - `/api/forecast/altitude-winds` returns distinct per-height winds with `vertical_wind` populated;
-- the GRIB disk on `/mnt/cache` stops ballooning now that W is deleted mid-run.
+- **Correction (found during the P0-4 tech-debt audit, 2026-07-30): W deletion bounds
+  *retention*, not *peak*.** The delete only runs after the whole download phase (`asyncio.gather`
+  completes, then `pres_array("W")`), so all three 3-D variables (U/V/W) still coexist on disk
+  for every horizon during a run — peak is unchanged at ~200 GB (CH1) / ~480 GB (CH2). See P0-4
+  in `specs/001-tech-debt-remediation/plan.md` and [[altitude-winds-hhl-fix]].
 See [[env-no-local-linux]] and [[altitude-winds-hhl-fix]].
 
 ---

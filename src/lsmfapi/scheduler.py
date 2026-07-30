@@ -5,6 +5,7 @@ import time
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from lsmfapi.collectors.grib_cache import log_startup_status
 from lsmfapi.collectors.icon_ch1_eps import IconCh1EpsCollector
 from lsmfapi.collectors.icon_ch2_eps import IconCh2EpsCollector
 from lsmfapi.database import collection_state as cs
@@ -68,6 +69,7 @@ class CollectorScheduler:
         self._scheduler = AsyncIOScheduler()
 
     async def startup(self) -> None:
+        log_startup_status()
         # CH1 (0–33 h, 1 km): trigger at 02/08/14/20 UTC — 2 h after each 00/06/12/18Z run
         # misfire_grace_time: APScheduler's default (1s) skips the whole 6h cycle if the
         # executor is even a few seconds late (observed on PRD for CH2 — see RESUME.md).

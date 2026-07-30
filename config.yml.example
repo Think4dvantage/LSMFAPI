@@ -5,3 +5,8 @@ meteoswiss:
 
 lenticularis:
   base_url: "https://lenticularis.lg4.ch"
+
+# Where downloaded GRIB2 files persist across restarts. A CH2 run peaks at ~480 GB here
+# (see .ai/context/architecture.md) — bind-mount this path onto a volume with headroom,
+# never the container's writable layer.
+grib_cache_dir: "/tmp/lsmfapi_grib"

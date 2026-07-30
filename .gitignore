@@ -1,6 +1,7 @@
 # Project-specific secrets and local state
 lsmfapi.db
 data/
+grib-cache/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

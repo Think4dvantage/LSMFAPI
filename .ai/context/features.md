@@ -22,6 +22,7 @@
 | v0.3.11 | Tech-debt remediation P1-1: `/health` is a real check now — `service`/`version`/`uptime_seconds` + `checks: {sqlite, scheduler, cache}`, returns 503 when SQLite is unreachable or the scheduler is stopped (never on a merely stale cache). App version now comes from `importlib.metadata` instead of a hardcoded `"0.1.0"` (also resolves P2-1). Docker healthcheck's `urlopen` now self-limits with `timeout=3`. Bundled the trivial P2-9 fix (`datetime.utcnow()` → `datetime.now(timezone.utc)` in `cache.py`) since `/health`'s cache-age calculation would otherwise crash on the naive/aware datetime mismatch |
 | v0.3.12 | Tech-debt remediation P1-2: telemetry error ring now aggregates by `(method, path, status, detail)` with `first_seen`/`last_seen`/`count` instead of raw append, so recurring 404 noise no longer saturates the last-20 buffer. Split `error_count` (5xx + collector/download failures) from `client_error_count` (4xx). 5xx/download errors log at ERROR, 4xx at WARNING (was DEBUG under an INFO root logger — invisible either way). Counters guarded with `threading.Lock` since collectors call from worker threads. Dropped `record_request()`'s unused params |
 | v0.3.13 | Tech-debt remediation P1-9: added `@app.exception_handler(Exception)` — unhandled exceptions previously propagated straight through `TelemetryMiddleware`'s `call_next()` (no registered handler existed for bare `Exception`), so genuine 500s were never logged, never counted, and never reached the dashboard. Now logs ERROR with `exc_info=True` and returns the documented `{"error": {code, message}}` envelope with no exception text in the body; `TelemetryMiddleware` picks the resulting response up automatically like any other ≥400 response |
+| v0.3.14 | Tech-debt remediation P0-4.1: `grib_cache_dir` is now a config key (default `/tmp/lsmfapi_grib`, same as before) instead of hardcoded, logged at startup along with free space on that volume (WARNING below 550 GB — a CH2 run peaks at ~480 GB). `docker-compose.yml` now bind-mounts `./grib-cache` onto it so DEV stops filling the container's writable layer. Corrected the v0.3.6 docs: W-file deletion bounds *retention*, not *peak* — peak during download is unchanged at ~200/480 GB (real fix is P0-4.2, still open) |
 
 ---
 
@@ -191,9 +192,12 @@ raw level numbers `[1..80]` and every altitude band collapsed onto index 79.
   `_build_level_indices`, `_approx_hybrid_to_pressure_hpa`, and the `pv` handling.
 - **Same API contract** — still nine bands (500–5000 m); the wind grid still omits 800 m. Only
   the values change (now correct and distinct per height).
-- **W retained + no longer leaks** — vertical wind (`vertical_wind`) is real data again; W
-  files (~1.8 GB each) are deleted immediately after their in-memory extraction so they stop
-  filling the container disk.
+- **W retained, retention bounded (not peak)** — vertical wind (`vertical_wind`) is real data
+  again; W files (~1.8 GB each) are deleted after their in-memory extraction so they don't
+  linger past the run that produced them. **Correction (found 2026-07-30, see P0-4 in
+  `specs/001-tech-debt-remediation/plan.md`): this does not lower the peak.** The delete runs
+  after the whole download phase completes, so U/V/W all still coexist on disk for every
+  horizon during a run — peak is unchanged at ~200 GB (CH1) / ~480 GB (CH2).
 - **CI guard** — the integration test now asserts altitude winds resolve to distinct,
   ordered values, so the collapse bug cannot silently regress.
 

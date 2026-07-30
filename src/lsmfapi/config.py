@@ -18,6 +18,7 @@ class LenticularisConfig(BaseModel):
 class Config(BaseModel):
     meteoswiss: MeteoSwissConfig
     lenticularis: LenticularisConfig
+    grib_cache_dir: str = "/tmp/lsmfapi_grib"
 
 
 @lru_cache(maxsize=1)
