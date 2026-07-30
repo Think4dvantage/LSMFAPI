@@ -69,16 +69,22 @@ class CollectorScheduler:
 
     async def startup(self) -> None:
         # CH1 (0–33 h, 1 km): trigger at 02/08/14/20 UTC — 2 h after each 00/06/12/18Z run
+        # misfire_grace_time: APScheduler's default (1s) skips the whole 6h cycle if the
+        # executor is even a few seconds late (observed on PRD for CH2 — see RESUME.md).
+        # ref_dt is computed from wall-clock at call time, so running late never fetches
+        # the wrong or stale data — it just needs to be allowed to run at all.
         self._scheduler.add_job(
             _run_ch1eps,
             CronTrigger(hour="2,8,14,20", minute=0, timezone="UTC"),
             id="collect_ch1eps",
+            misfire_grace_time=1800,
         )
         # CH2 (34–120 h, 2.1 km): trigger at 03/09/15/21 UTC — 3 h after each 00/06/12/18Z run
         self._scheduler.add_job(
             _run_ch2eps,
             CronTrigger(hour="3,9,15,21", minute=0, timezone="UTC"),
             id="collect_ch2eps",
+            misfire_grace_time=1800,
         )
         self._scheduler.start()
         logger.info("Scheduler started — warming cache in background")

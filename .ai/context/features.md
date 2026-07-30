@@ -1,6 +1,6 @@
 # Feature History & Backlog
 
-## Current Version: v0.3.6
+## Current Version: v0.3.7
 
 ### Shipped Milestones
 
@@ -15,6 +15,7 @@
 | v0.3.4 | eccodes stack pinned: `poetry.lock` committed, explicit `eccodeslib`, apt libeccodes and the conda CI step removed. Fixes the v0.3.3 PRD crash loop and turns CI green for the first time |
 | v0.3.5 | Grid build moved off the event loop (`asyncio.to_thread`) — the API stayed unreachable for the whole build (~8 min CH1, ~20 min CH2), ~1.5–2 h/day |
 | v0.3.6 | Altitude winds + wind-grid-at-altitude fixed: interpolate U/V/W to true MAMSL heights from HHL (EPS files are model levels with no pv, so pressure matching collapsed all bands onto one level). W files now deleted right after extraction (they filled ~200 GB); GRIB pool moved to a bigger disk via the PRD pipeline |
+| v0.3.7 | CH2 cron misfire fixed: `misfire_grace_time=1800` on both scheduler jobs — APScheduler's ~1s default was silently skipping CH2 triggers late by only a few seconds, leaving the cache stuck on a stale run for a full 6h cycle while CH1 kept updating normally |
 
 ---
 
@@ -192,6 +193,48 @@ raw level numbers `[1..80]` and every altitude band collapsed onto index 79.
 
 Storage: the GRIB pool (~200 GB/run, dominated by the 3D U/V/W files) was relocated off `/`
 to a larger disk via the separate PRD pipeline repo (compose bind mount), not in this repo.
+
+---
+
+## v0.3.7 — CH2 Scheduler Misfire Fixed ✓ SHIPPED
+
+**Symptom (reported on PRD, lsmfapi.sdh.lol)**: dashboard showed CH2's station/grid/thermal
+caches stuck on the `00:00Z` run (`is_current: false`) hours after the `06:00Z` and later runs
+had been published, while CH1 kept advancing normally through `06Z → 12Z` on schedule.
+
+**Root cause**: `docker logs` showed, exactly twice in five days, a CH2-only line —
+`Run time of job "_run_ch2eps ..." was missed by 0:00:01.767140` (and another missed by
+`0:00:06.978634`) — with **no corresponding "executed successfully" line** for that trigger.
+APScheduler's `add_job()` was called with no `misfire_grace_time`, so it used the library
+default (on the order of 1s). Any executor jitter past that — GIL contention from the other
+model's `asyncio.to_thread` GRIB/numpy work, a slow event-loop tick, anything — makes
+APScheduler classify the trigger as **misfired and skip it outright**, not run it late. CH1
+never hit this in five days of logs; CH2's ~2h collect() apparently perturbs the loop enough
+to occasionally lose the race by single-digit seconds.
+
+Once a trigger is skipped this way the model silently stays on the previous ref_dt until the
+*next* 6-hourly slot — up to 6h of visible "stuck" cache with no error logged anywhere
+(`last_error` stays null, since the job function was never even invoked).
+
+**Why the fix is safe**: `_latest_ref_dt()` / `_latest_ref_dt_ch2()` compute the target run
+purely from `datetime.now(timezone.utc)` at call time, not from which cron slot fired them —
+so letting a job run up to 30 min late still resolves to the correct (or newer) ref_dt. The
+per-model `_ch1_lock`/`_ch2_lock` already prevent overlapping runs of the same model
+independently of this. And the GRIB persistence cache (`grib_cache.py`) already skips
+re-downloading any file it already holds for that ref_dt, so a late-but-not-skipped run never
+re-fetches data it already has — it only ever fetches what's actually missing.
+
+**Fix**: `misfire_grace_time=1800` (30 min) added to both `add_job()` calls in
+`scheduler.py`. Generous enough to absorb the observed jitter (seconds) with wide margin,
+while still small relative to the 6h cycle and the collectors' own 2–3h "already published"
+guard windows, so a genuinely stuck process still skips forward cleanly instead of piling up
+stale triggers.
+
+**Verification**: not reproducible as a unit test (APScheduler's own misfire detection, not
+application logic) — confirmed via PRD log history (`docker logs lsmfapi`, both misses were
+CH2-only, both under 7s) and via the dashboard's `is_current`/`ref_dt` per model. Post-deploy,
+confirm no further `"was missed by"` lines for `collect_ch2eps` without a matching hourly
+`executed successfully`, and that CH2's `ref_dt` advances each 6h slot going forward.
 
 ---
 

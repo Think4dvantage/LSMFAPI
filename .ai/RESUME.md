@@ -1,3 +1,48 @@
+# Resume Notes — 2026-07-30
+
+## What Was Done This Session
+
+### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
+
+**Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
+looked outdated while LSMFAPI "just sat there" and then moved on to collect CH1 — wanted the
+service to prioritize catching up whatever is stale instead of proceeding on schedule and
+re-downloading data it already has.
+
+**Diagnosis** (read-only, via `ssh sdh` + `docker logs`/`docker exec curl` into the running
+container — no changes made to PRD): `/api/dashboard` showed CH2 `ref_dt: 2026-07-30T00:00:00Z`,
+`expected_ref_dt: 06:00:00Z`, `is_current: false`, while CH1 was healthily mid-collection for the
+current `12:00Z` run. `docker logs lsmfapi --since 2026-07-25` surfaced the smoking gun — twice
+in five days, CH2-only: `Run time of job "_run_ch2eps ..." was missed by 0:00:01.767140` /
+`0:00:06.978634`, each with no matching `"executed successfully"` line. CH1 never missed once.
+APScheduler's `add_job()` calls had no `misfire_grace_time`, so a few seconds of executor jitter
+(plausibly from CH2's own ~2h `collect()` perturbing the loop) made APScheduler **skip the
+trigger outright** rather than run it late — leaving the model stuck on the prior ref_dt for a
+full 6h cycle with `last_error` still null (the job function was never even invoked).
+
+**Fix (v0.3.7)**: `misfire_grace_time=1800` added to both `collect_ch1eps`/`collect_ch2eps`
+`add_job()` calls in `scheduler.py`. Confirmed safe to run late: `_latest_ref_dt()` /
+`_latest_ref_dt_ch2()` compute the target run from wall-clock at call time (not the cron slot),
+and `grib_cache.py`'s persistence already skips re-downloading anything already fetched for that
+ref_dt — so a late-but-not-skipped run only ever fetches what's actually missing, never repeats
+work. `pyproject.toml` bumped 0.3.6 → 0.3.7. See [[altitude-winds-hhl-fix]] for the previous
+session's unrelated v0.3.6 fix.
+
+**Still open**:
+- **Not yet deployed to PRD.** This is a code-only fix in the repo; PRD (`lsmfapi.sdh.lol`,
+  container `lsmfapi`, image `ghcr.io/think4dvantage/lsmfapi:v0.3.6`) still runs the old
+  scheduler and CH2 will remain stale until the next lucky on-time trigger or a redeploy with
+  this fix. Deployment to that host was intentionally left for the user/pipeline — PRD is
+  off-limits to direct changes per the constitution in `00-ai-usage.md`.
+- No reproduction test added — this is an APScheduler timing/library behavior, not application
+  logic, consistent with how past scheduler/eccodes infra bugs in this project were verified via
+  PRD log evidence rather than pytest (see v0.3.1 scheduler race, v0.3.4 eccodes drift).
+- After deploy, confirm on PRD: no further `"was missed by"` log lines for `collect_ch2eps`
+  without a matching `"executed successfully"`, and CH2's `/api/dashboard` `ref_dt` advances
+  each 6h slot without falling behind CH1.
+
+---
+
 # Resume Notes — 2026-07-21
 
 ## What Was Done This Session
