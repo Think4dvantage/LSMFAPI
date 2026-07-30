@@ -456,6 +456,33 @@ FastAPI's own 422 was a fourth. Four shapes, one documented contract
 returns the same envelope shape at 422; `/api/stations` with Lenticularis down returns a
 generic message with no URL leak, while the real error still appears in the logs.
 
+### v0.3.26 — P2-12 `docs/forecast-data-reference.md` rewritten
+
+**Finding**: this user-facing doc described the implementation v0.3.6 deleted (an
+altitude→pressure table for a mechanism with no `pv` coordinate to use), stated wrong
+horizons/cadence/member counts, wrong units (m/s instead of km/h for wind), the wrong humidity
+source (`QV`+Bolton instead of `TD_2M`+Magnus), and — the biggest structural error — presented
+solar/cloud/CAPE/CIN/BLH as if they were fields on the per-station hourly response, when they
+have only ever lived on `/thermal-grid`, a separate spatial-grid endpoint. `HPBL`/`HBAS_CON`
+(boundary layer height, convective cloud base) aren't published upstream at all and were never
+real fields.
+
+**Fix**: rewrote the whole document against `architecture.md`, `04-constraints.md`, and the
+actual Pydantic models (`StationForecastHour`, `AltitudeWindLevel`, `ThermalGridCache`) as
+ground truth. Deleted the altitude→hPa table entirely. Split the reference into one section
+per actual endpoint (`/station`, `/altitude-winds`, `/thermal-grid`, `/wind-grid`) instead of
+one undifferentiated variable list, and rewrote the paragliding-workflow checklist to name
+which endpoint each field actually comes from.
+
+**Also**: the oldest dated entry in this file (2026-04-18)'s "Known Issues / Deferred" section
+listed five items that are all resolved by sessions above it — added a header note marking it
+historical (all five annotated with what fixed them) rather than deleting it, since it's a
+legitimate record of what was true on that date.
+
+**Left alone**: `features.md`'s own "Known Issues" `sunshine_minutes` entry is the *same* stale
+claim P2-12 flagged — deliberately not touched here, since deleting it properly is P1-11's job
+(it needs the accompanying real-fallback-bug fix, not just doc surgery).
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
@@ -1005,19 +1032,19 @@ Altitude winds now stored and served separately:
 Added `/api/stations` proxy endpoint in `accuracy.py` that calls Lenticularis server-side.
 Also fixed field names: `s.station_id`, `s.latitude`, `s.longitude` (was `s.id`, `s.lat`, `s.lon`).
 
-## Known Issues / Deferred
+## Known Issues / Deferred (as of this 2026-04-18 session — all resolved by later sessions,
+kept here only as history; see the top of this file for current state)
 
-- **`sunshine_minutes` wrong for CH2 first step** — h=30 is the first CH2 horizon; the accumulated
-  value from model start (30h of sunshine) is used as the delta, not 3h. Needs special-casing for
-  the first step: treat the accumulated value as the per-step value, or fetch h=27 to diff against.
-- **`cin: -999.9`** — ICON fill value for "no convection present". Should map to `null`.
-  Fix: clip `CIN_ML` to `None` where value < -900.
-- **U/V/W pressure-level data all null** — probe downloads succeed but values are null in response.
-  Not yet investigated. May be eccodes level-type mismatch or STAC search returning no results.
-- **`fetchActuals` / `fetchForecasts` in index.js** still call Lenticularis directly from browser
-  → will CORS-fail when analysis is run. Need same proxy treatment as stations.
-- **Wind-grid endpoint** (`GET /api/forecast/wind-grid`) is a stub — `set_grid_forecast` is never
-  called. Not yet implemented.
+- ~~`sunshine_minutes` wrong for CH2 first step~~ — resolved by `ACCUM_PRIOR_H`/the shadow h33
+  fetch (see v0.3+); the stale restatement of this in `features.md`'s Known Issues was itself
+  corrected in the P1-11 entry above.
+- ~~`cin: -999.9`~~ — fixed; `CIN_ML` is clipped to NaN→`null` (see `_CIN_FILL_THRESHOLD`).
+- ~~U/V/W pressure-level data all null~~ — this was the root cause fixed in v0.3.6 (HHL height
+  interpolation replaced the broken pressure mapping); see [[altitude-winds-hhl-fix]].
+- ~~`fetchActuals`/`fetchForecasts` in index.js~~ — moot; the whole accuracy GUI (`index.html`/
+  `index.js`/`accuracy.py`) was removed in v0.3.2, see that entry above.
+- ~~Wind-grid endpoint is a stub~~ — implemented; `set_grid_wind_cache` is called from both
+  collectors' `collect_grid()`.
 
 ## Key Files
 
