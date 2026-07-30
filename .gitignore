@@ -1,5 +1,6 @@
 # Project-specific secrets and local state
 lsmfapi.db
+config.yml
 data/
 grib-cache/
 

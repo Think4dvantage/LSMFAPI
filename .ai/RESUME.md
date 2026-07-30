@@ -176,6 +176,29 @@ same work as P1-4) is deferred to land alongside the single-pass GRIB extraction
 **Verify** (pending PRD deploy): startup log shows `GRIB cache dir: ...` and a free-space line;
 `du -sh` on the bind-mounted `./grib-cache` (not the container layer) grows during a run.
 
+### v0.3.15 — P1-6 `config.yml` untracked
+
+**Finding**: `config.yml` was tracked in git despite `04-constraints.md` and `README.md:35`
+both stating it's gitignored. Verified no leak: `git log -p --follow -- config.yml` shows no
+token/password/secret string in any revision, and the Dockerfile doesn't `COPY` it (compose
+bind-mounts it), so nothing was baked into a published image. Still wrong to leave tracked —
+it's the designated home for real credentials and one commit from publishing one.
+
+**Fix**: `git rm --cached config.yml` (kept on disk, not deleted); added `config.yml` to
+`.gitignore`; removed the dead `scheduler:` block from the local file (the real schedule is
+hardcoded cron, per `04-constraints.md`); fixed the README wording. `config.yml.example`
+already documents every key `config.py` reads (confirmed after the P0-4.1 `grib_cache_dir`
+addition).
+
+**Not yet done — needs the user's attention before/at deploy**: once untracked, `config.yml`
+no longer arrives via git/rsync. Both DEV and PRD hosts must already have their own
+`config.yml` on disk (they do — it was already gitignored-in-spirit and bind-mounted, never
+baked into the image), but this is the point to double-check before rolling out a container
+built from this commit, since PRD is off-limits to direct changes.
+
+**Verify**: `git status` shows `config.yml` as untracked-but-present; `git log` for the file
+stops advancing.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

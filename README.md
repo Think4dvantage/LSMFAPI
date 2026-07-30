@@ -32,7 +32,7 @@ The API will be available at `http://localhost:8000`.
 
 ## Configuration
 
-All configuration lives in `config.yml` (gitignored). Use `config.yml.example` as the template.
+All configuration lives in `config.yml` (gitignored — copy from `config.yml.example`).
 
 | Section | Key | Description |
 |---|---|---|
