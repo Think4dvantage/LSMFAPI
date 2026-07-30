@@ -292,16 +292,17 @@
     </div>
 
     <!-- Recent errors -->
-    <div class="section-title">Recent Errors (last 20)</div>
+    <div class="section-title">Recent Errors (last 20 distinct)</div>
     <div class="card" style="padding:0;overflow:hidden;">
       <div id="errors-empty" class="muted" style="padding:16px;display:none;">No errors recorded this session.</div>
       <table id="errors-table" style="display:none;">
         <thead>
           <tr>
-            <th>Time</th>
+            <th>Last seen</th>
             <th>Method</th>
             <th>Path</th>
             <th>Status</th>
+            <th>Count</th>
             <th>Detail</th>
           </tr>
         </thead>

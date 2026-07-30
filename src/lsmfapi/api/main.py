@@ -53,7 +53,7 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if path.startswith("/api/"):
-            telemetry.record_request(request.method, path)
+            telemetry.record_request()
         response = await call_next(request)
         if path.startswith("/api/") and response.status_code >= 400:
             body = b""

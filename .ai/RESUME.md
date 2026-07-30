@@ -106,6 +106,33 @@ item to fix now rather than wait for the G6 cleanup batch.
 manually stopping the scheduler (or SQLite) flips `status` to `degraded` and the HTTP code to
 503.
 
+### v0.3.12 — P1-2 telemetry error ring no longer self-saturates, errors now log visibly
+
+**Finding**: `telemetry.py`'s `_recent_errors` was a raw `deque(maxlen=20)`, appended per
+occurrence with no de-duplication. On PRD every one of the last 20 entries was the same five
+recurring station 404s (stations deleted upstream, still polled) — real errors were evicted
+within minutes and the panel showed nothing useful for 8 days. Compounding:
+`record_error`/`record_download_error` logged at DEBUG under an INFO root logger, so none of
+this ever reached the logs either.
+
+**Fix**:
+1. Errors now aggregate by `(method, path, status, detail)` in an `OrderedDict` capped at 20
+   *distinct* groups — `{first_seen, last_seen, count}`, bumped on repeat instead of appended.
+   `dashboard.js`/`dashboard.html` updated to render `last_seen` + `count` (escaped, per P0-1).
+2. Split `error_count` (5xx + collector/download failures — "might be our fault") from
+   `client_error_count` (4xx — routine, e.g. an unknown station). Both exposed in
+   `/api/dashboard`'s `requests` object.
+3. 5xx and download errors now log at ERROR, 4xx at WARNING.
+4. Counters and the error-group dict are guarded by a `threading.Lock` — collectors call
+   `record_download_error` from `asyncio.to_thread` worker threads, so the old
+   `_error_count += 1` was a non-atomic read-modify-write (lost-count risk, not corruption).
+5. `record_request(method, path)` ignored both parameters; dropped them (`record_request()`),
+   updated the one call site in `main.py`.
+
+**Verify** (pending PRD deploy): the five stale-station 404s collapse into one row with a
+rising count instead of filling the panel; deliberately triggering a 500 shows up in the panel
+**and** as an ERROR log line.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

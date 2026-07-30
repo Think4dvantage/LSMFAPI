@@ -287,10 +287,11 @@ function renderErrors(errors) {
   tableEl.style.display = "";
   tbody.innerHTML = [...errors].reverse().map(e => `
     <tr>
-      <td style="white-space:nowrap;">${escapeHtml(fmtDt(e.ts))}</td>
+      <td style="white-space:nowrap;">${escapeHtml(fmtDt(e.last_seen))}</td>
       <td>${escapeHtml(e.method)}</td>
       <td style="font-family:monospace;font-size:12px;">${escapeHtml(e.path)}</td>
       <td><span class="badge badge-err">${escapeHtml(e.status)}</span></td>
+      <td>${escapeHtml(e.count)}</td>
       <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;">${escapeHtml(e.detail ?? "")}</td>
     </tr>`).join("");
 }

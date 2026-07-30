@@ -87,6 +87,7 @@ async def dashboard_stats() -> dict:
             "started_at": telemetry["started_at"],
             "total": telemetry["request_count"],
             "error_count": telemetry["error_count"],
+            "client_error_count": telemetry["client_error_count"],
         },
         "recent_errors": telemetry["recent_errors"],
     }
