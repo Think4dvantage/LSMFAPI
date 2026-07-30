@@ -20,6 +20,18 @@
 
 The `scheduler:` section in `config.yml` is dead config — the scheduler uses hardcoded cron triggers (02/08/14/20Z for CH1, 03/09/15/21Z for CH2). Do not add scheduler keys to `config.py`.
 
+**Shared modules used by both collectors must never call `get_config()` (or read any other
+patchable global like `datetime.now()`) themselves — take the resolved value as a parameter
+instead.** `tests/test_e2e_collection.py` monkeypatches `get_config`/`HORIZONS`/`datetime` on
+the `icon_ch1_eps` **module's own namespace**; a shared module (`collectors/grib_cache.py`,
+`collectors/_icon_eps_base.py`) that resolves these itself gets a *different* binding of the
+same name and silently bypasses the patch. This broke CI once already (`grib_cache.py`'s
+`_base_dir()` called `get_config()` directly — see `.ai/RESUME.md` v0.3.39): the fix was to
+pass `grib_cache_dir` in from the caller (`_icon_eps_base.py`'s `collect()` via `self._cfg()`)
+instead. See `.ai/context/architecture.md`'s "Collector architecture — shared base class"
+section for the full pattern (`_cfg()`/`_compute_ref_dt()`/`HORIZONS`-as-property) if adding a
+third model or touching this indirection.
+
 ---
 
 ## Database Migrations
