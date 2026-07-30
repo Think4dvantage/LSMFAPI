@@ -497,6 +497,47 @@ time, same reasoning as the P2-12 "Known Issues" annotation above).
 
 **Verify**: `ruff check .` — 4 → **0** findings. The lint gate added in P3-2 is now fully green.
 
+### v0.3.28 — P3-10 repo hygiene (+ P3-7 remote.ps1)
+
+**Findings**: `.claude/settings.local.json` (a per-developer `*.local.*` file) was tracked with
+no `.claude/` gitignore entry, causing recurring spurious diffs; `.gitignore` was a 212-line
+unmodified GitHub Python template covering Django/Scrapy/Celery/SageMath/Marimo/Abstra/Cursor
+— none used by this project — while missing the two things that actually mattered
+(`config.yml`, `.claude/`); the healthcheck was declared in both `Dockerfile` and
+`docker-compose.yml` (two copies to keep in sync, the compose one redundant since Docker
+inherits the image's `HEALTHCHECK` unless overridden); `start-period=10s` was thin given
+`load_cache()` must JSON-parse ~170 MB and `np.load()` two npz files before uvicorn serves
+anything.
+
+Folded in **P3-7** (an item the plan's own sequencing table omitted, but the user already
+confirmed during the up-front decisions round): `scripts/remote.ps1`, ~85% duplicate of
+`LSMF-dev.ps1`, deployed the **base** compose with no dev overlay and printed the **production**
+hostname (`lsmfapi.lg4.ch`) on success — exactly the footgun `README.md:266` warns against in
+bold. No references anywhere outside itself.
+
+**Fix**:
+- `git rm --cached .claude/settings.local.json` (kept on disk); `.claude/` added to
+  `.gitignore`.
+- `.gitignore` trimmed from 212 to ~35 lines — kept only what this Python/FastAPI project
+  actually produces (bytecode, venvs, coverage, mypy/ruff caches, logs) plus the
+  project-specific secrets/state section.
+- Deleted `scripts/remote.ps1`.
+- Removed the `healthcheck:` block from `docker-compose.yml` (Dockerfile's `HEALTHCHECK` now
+  the single source); bumped `--start-period` 10s → 60s in the `Dockerfile`.
+
+**Deferred, noted but not done**: `pyproject.toml`'s legacy `[tool.poetry]` → PEP 621
+`[project]` migration — the plan itself calls this low priority, and restructuring the file's
+core sections without being able to fully exercise `poetry install`/`poetry build` on this
+Windows box (see P3-2's lock-regeneration entry for how carefully that has to be handled) isn't
+worth the risk for a cosmetic change. The Dockerfile's two `poetry install --only main` calls
+are intentional layer caching (deps layer first, cached across source-only changes; the second
+call is fast since deps are already resolved) rather than a bug — left alone; the
+`PYTHONUNBUFFERED`/`PYTHONDONTWRITEBYTECODE` env vars P3-10 also flagged are deferred to P2-2,
+which touches this same Dockerfile next.
+
+**Verify**: `git status` shows `.claude/settings.local.json` as untracked-but-present; a fresh
+`docker compose up` still gets a working healthcheck from the image alone.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

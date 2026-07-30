@@ -18,7 +18,9 @@ RUN poetry install --only main --no-interaction --no-ansi
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=10s --timeout=5s --retries=2 --start-period=10s \
+# start-period=60s: load_cache() JSON-parses ~170 MB and np.load()s two npz files before
+# uvicorn serves anything — 10s was thin enough to risk a false-unhealthy on a cold start.
+HEALTHCHECK --interval=10s --timeout=5s --retries=2 --start-period=60s \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
 
 CMD ["uvicorn", "lsmfapi.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
