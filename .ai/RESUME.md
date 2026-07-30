@@ -483,6 +483,20 @@ legitimate record of what was true on that date.
 claim P2-12 flagged — deliberately not touched here, since deleting it properly is P1-11's job
 (it needs the accompanying real-fallback-bug fix, not just doc surgery).
 
+### v0.3.27 — P3-6 `scripts/diag_interlaken.py` deleted
+
+**Finding**: imported `_extract_station` from `icon_ch1_eps.py` — a symbol that has never
+existed anywhere in `src/` (confirmed: the only repo-wide hit was the import line itself). The
+script raised `ImportError` before executing a single line, and had been rotting undetected
+because there was no lint (fixed by P3-2). Also hardcoded a container path
+(`sys.path.insert(0, "/app/src")`) so it never ran from a plain checkout either.
+
+**Fix**: deleted. Confirmed no live references anywhere outside historical RESUME.md/
+features.md log entries (which correctly stay as-is — they're a record of what was true at the
+time, same reasoning as the P2-12 "Known Issues" annotation above).
+
+**Verify**: `ruff check .` — 4 → **0** findings. The lint gate added in P3-2 is now fully green.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
