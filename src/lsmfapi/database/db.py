@@ -1,6 +1,6 @@
 import logging
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,19 @@ def init_db() -> None:
     Base.metadata.create_all(_engine)
     _run_column_migrations()
     logger.info("Database initialised")
+
+
+def check_db() -> bool:
+    """Cheap connectivity check for /health — SELECT 1, no table dependency."""
+    if _engine is None:
+        return False
+    try:
+        with _engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception:
+        logger.error("Health check: SQLite unreachable", exc_info=True)
+        return False
 
 
 def get_db():

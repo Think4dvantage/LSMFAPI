@@ -1,5 +1,8 @@
 import logging
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from importlib.metadata import version as pkg_version
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse, Response
@@ -10,7 +13,7 @@ from starlette.requests import Request
 from lsmfapi.api.routers import dashboard, forecast
 from lsmfapi.database import telemetry
 from lsmfapi.database.cache import cache_stats, load_cache, save_cache
-from lsmfapi.database.db import init_db
+from lsmfapi.database.db import check_db, init_db
 from lsmfapi.scheduler import CollectorScheduler
 
 logging.basicConfig(
@@ -22,6 +25,8 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 _scheduler: CollectorScheduler | None = None
+_SERVICE_VERSION = pkg_version("lsmfapi")
+_started_monotonic = time.monotonic()
 
 
 @asynccontextmanager
@@ -41,7 +46,7 @@ async def lifespan(app: FastAPI):
     save_cache()
 
 
-app = FastAPI(title="LSMFAPI", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="LSMFAPI", version=_SERVICE_VERSION, lifespan=lifespan)
 
 
 class TelemetryMiddleware(BaseHTTPMiddleware):
@@ -75,4 +80,36 @@ async def root() -> RedirectResponse:
 
 @app.get("/health", include_in_schema=False)
 async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok", **cache_stats()})
+    checks: dict[str, str] = {}
+    healthy = True
+
+    db_ok = check_db()
+    checks["sqlite"] = "ok" if db_ok else "unreachable"
+    healthy &= db_ok
+
+    scheduler_running = bool(_scheduler and _scheduler.is_running())
+    job_count = _scheduler.job_count() if _scheduler else 0
+    checks["scheduler"] = f"running ({job_count} jobs)" if scheduler_running else "stopped"
+    healthy &= scheduler_running
+
+    stats = cache_stats()
+    warm = bool(stats["ch1_station_cache_keys"] or stats["ch2_station_cache_keys"])
+    last_populated_at = stats["last_populated_at"]
+    if warm and last_populated_at:
+        age_s = (datetime.now(timezone.utc) - datetime.fromisoformat(last_populated_at)).total_seconds()
+        checks["cache"] = f"warm (age {age_s:.0f}s)"
+    else:
+        checks["cache"] = "warm" if warm else "cold"
+    # Stale-but-serving is intentional behaviour — never 503 on cache age alone.
+
+    body = {
+        "status": "ok" if healthy else "degraded",
+        "service": "lsmfapi",
+        "version": _SERVICE_VERSION,
+        "uptime_seconds": round(time.monotonic() - _started_monotonic, 1),
+        "checks": checks,
+    }
+    if not healthy:
+        logger.warning("Health check degraded: %s", checks)
+        return JSONResponse(body, status_code=503)
+    return JSONResponse(body)

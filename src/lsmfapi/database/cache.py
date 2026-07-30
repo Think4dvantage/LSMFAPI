@@ -88,7 +88,7 @@ def set_station_forecast(station_key: str, data: StationForecastResponse) -> Non
         _ch1_station_cache[station_key] = data
     else:
         _ch2_station_cache[station_key] = data
-    _last_populated_at = datetime.utcnow()
+    _last_populated_at = datetime.now(timezone.utc)
 
 
 def known_stations() -> frozenset[str]:
@@ -390,7 +390,7 @@ def load_cache() -> None:
                 for k, v in data.get("ch2_altitude_winds", {}).items()
             }
             if _ch1_station_cache or _ch2_station_cache:
-                _last_populated_at = datetime.utcnow()
+                _last_populated_at = datetime.now(timezone.utc)
             logger.info(
                 "Cache loaded: %d CH1 + %d CH2 stations from %s",
                 len(_ch1_station_cache), len(_ch2_station_cache), CACHE_FILE,

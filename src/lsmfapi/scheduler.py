@@ -93,3 +93,9 @@ class CollectorScheduler:
     def shutdown(self) -> None:
         self._scheduler.shutdown(wait=False)
         logger.info("Scheduler stopped")
+
+    def is_running(self) -> bool:
+        return self._scheduler.running
+
+    def job_count(self) -> int:
+        return len(self._scheduler.get_jobs())

@@ -19,6 +19,6 @@ RUN poetry install --only main --no-interaction --no-ansi
 EXPOSE 8000
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=2 --start-period=10s \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
 
 CMD ["uvicorn", "lsmfapi.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

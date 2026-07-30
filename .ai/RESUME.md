@@ -75,6 +75,37 @@ the v0.3.5 grid-build stall, just in the save path instead.
 shrinks to a few seconds with access-log lines appearing inside it; both npz files still load
 on next restart (`Grid cache loaded` / `Thermal grid cache loaded` at INFO).
 
+### v0.3.11 — P1-1 `/health` can now actually report unhealthy
+
+**Finding**: `/health` was `return JSONResponse({"status": "ok", **cache_stats()})` —
+unconditional 200, no version, no uptime, no subsystem checks. Confirmed on PRD:
+`FailingStreak=0, RestartCount=0` after 8 days despite the P0-3 43s stalls — a blocked loop
+makes the Docker probe *hang* rather than fail, so the container reported healthy while
+serving nothing.
+
+**Fix**: real checks per `08-operability.md` —
+- `sqlite`: cheap `SELECT 1` via new `db.check_db()` (works even before any table exists).
+- `scheduler`: `CollectorScheduler.is_running()` / `.job_count()` → `"running (N jobs)"` /
+  `"stopped"`.
+- `cache`: `"warm (age Xs)"` / `"warm"` / `"cold"` from `cache_stats()` — **never** contributes
+  to the 503 decision; a stale-but-serving cache is intended behaviour.
+- Returns **503** only when SQLite is unreachable or the scheduler is stopped; logs the
+  `checks` dict at WARNING whenever that happens.
+- `service`, `version` (`importlib.metadata.version("lsmfapi")` — also fixes P2-1's hardcoded
+  `"0.1.0"`, 7 releases stale), `uptime_seconds` (`time.monotonic()` since module import).
+- Docker healthcheck's `urlopen` now passes `timeout=3` so the probe self-limits instead of
+  relying on Docker's own `--timeout=5s`.
+
+**Bundled in**: P2-9's `datetime.utcnow()` → `datetime.now(timezone.utc)` fix in `cache.py`
+(2 sites) — `/health`'s cache-age subtraction is `aware − naive`, which raises `TypeError`
+the moment the cache actually populates. Small enough and directly load-bearing for this
+item to fix now rather than wait for the G6 cleanup batch.
+
+**Verify** (pending PRD deploy): `/health` returns `version` matching `pyproject.toml`,
+`uptime_seconds` counting up, and `checks.cache` showing an age once a collection completes;
+manually stopping the scheduler (or SQLite) flips `status` to `degraded` and the HTTP code to
+503.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
