@@ -2,6 +2,44 @@
 
 ## What Was Done This Session
 
+**TL;DR for a reader who doesn't want to scroll through 40 entries**: a full tech-debt audit
+(`specs/001-tech-debt-remediation/plan.md`, 23 findings across P0–P3) was implemented
+end-to-end this session — every item either shipped or explicitly deferred with reasoning
+(see the "Deferred" list below). 36 commits, v0.3.7 → v0.3.40, tagged and pushed. **CI is
+confirmed green as of v0.3.39** (real ~4 min test runs, not setup failures) and the Docker
+image published successfully — this is the first real end-to-end proof this session's
+collector changes work against live MeteoSwiss GRIB data. Nothing is left in-progress; the
+next session can start fresh from any open item below or from the plan document itself.
+
+**Shipped**: XSS fix + input validation, TLS verification restored, `save_cache()`/GRIB
+parsing/station-building moved off the event loop, real `/health` checks, aggregated
+telemetry, a global exception handler, normalized error envelope, closed STAC search
+interval, two silent-fallback bugs fixed, configurable GRIB cache dir + low-space warning,
+`config.yml` untracked + `extra="forbid"`, CI test-gates releases + fast unit lane + ruff (0
+findings) + Dependabot, ~200 lines of dead code removed, stale docs rewritten, repo hygiene,
+Dockerfile/dependency pinning, numpy ceiling relaxed, circular wind-direction stats, W-file
+immediate deletion, the shared `IconEpsCollectorBase` extraction (81% duplicate code removed),
+collector efficiency wins, and (found during doc sync, not originally scheduled) stopped
+creating unused Recipe/RecipeRule tables.
+
+**Deferred, each with a documented reason** (search this file for the item number for the
+full write-up): **P0-4.2/P1-4** — `U`/`V`'s full disk-peak fix needs interleaving grid
+computation with the download phase, a bigger rewrite than a quick patch; started but only the
+safe `W`-deletion subset shipped. **P3-8** — dropping `forecast:horizon` from STAC search
+payloads (34–87× fewer searches) and shrinking `_GRID_LEVEL_HEIGHTS` retention both need real
+control-flow changes, not mechanical tweaks. **P1-12** (non-root container) — skipped per user
+decision, needs host-side coordination outside this repo. **P1-8** (dashboard auth) — no code
+fix needed, already handled by Traefik + Pocket ID at the infra layer per the user.
+
+**Bug found and fixed mid-session, not part of the original plan**: the P0-4.1 change made
+`grib_cache.py` call `get_config()` directly, which silently bypassed
+`test_e2e_collection.py`'s module-scoped monkeypatch and broke CI the moment anything was
+actually pushed (nothing was pushed mid-session — see the v0.3.39 entry for the full story
+and why that's a process lesson, not just a bug). Now documented as a hard constraint in
+`.ai/instructions/04-constraints.md`.
+
+---
+
 ### Tech-debt remediation plan
 
 A full audit of `src/`, `static/`, build/CI files plus live PRD inspection produced
