@@ -935,9 +935,24 @@ bypass-a-monkeypatch shape — all other call sites are either in the correctly-
 per-subclass collector modules or in code paths this particular test doesn't exercise
 (`api/main.py`, `dashboard.py`).
 
-**Not yet re-verified by CI at time of writing** — `git push` + a fresh tag needed after this
-fix lands, and the actual CI run is the only real proof (see the next entry, if this session
-continues far enough to confirm it, or check `gh run list` in the next session if not).
+**Confirmed by CI** (`gh run list` / `gh run view` after pushing `v0.3.39`): both the `main`
+push and the `v0.3.39` tag build went green, and — critically — for real this time: the
+`Integration test` run took 3m54s and the tag's `test` job took 3m48s, both consistent with
+`06-testing-conventions.md`'s "a real pass reads ~250s" rule, not the ~30s setup-failure
+pattern v0.3.38 showed. `build-and-push` then ran (1m10s) and published
+`ghcr.io/think4dvantage/lsmfapi:v0.3.39` (+ `:latest`, `:0.3`, `:0`) — the P3-1 gate worked
+exactly as designed: a red test blocked the image at `v0.3.38`, and it only shipped once the
+regression was actually fixed. **This is the first real, end-to-end confirmation that this
+entire remediation pass's collector changes work against live MeteoSwiss GRIB data** — every
+other "verify via CI" note in the entries above was, in effect, retroactively confirmed by
+this one green run, since it's the same collector code path (single-pass `_fetch_step` reads,
+`asyncio.to_thread` wrapping, the shared `IconEpsCollectorBase`, the STAC closed interval, the
+P1-11 fallback fixes, all of it) exercised together for the first time.
+
+Minor, non-blocking: the run logs an informational deprecation notice for the `docker/*`
+actions (`build-push-action`, `login-action`, `metadata-action`, `setup-buildx-action`)
+targeting Node 20 — separate from the `actions/checkout`/`actions/setup-python` bumps P3-4
+already did. Not urgent; note for a future dependabot-driven bump.
 
 ### v0.3.40 — P2-10 finally implemented (decision made early, task never scheduled)
 

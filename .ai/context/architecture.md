@@ -123,24 +123,77 @@ from the rsync deploy so the remote cache is never overwritten by a deploy.
 
 ### GRIB file persistence cache
 
-GRIBs are stored in `/tmp/lsmfapi_grib/{model}/{YYYYMMDDTHHMMZ}/` (not a throwaway `tempfile`).
+GRIBs are stored in `{grib_cache_dir}/{model}/{YYYYMMDDTHHMMZ}/` (not a throwaway `tempfile`;
+`grib_cache_dir` is a `config.yml` key, default `/tmp/lsmfapi_grib`).
 
-- Implemented in `collectors/grib_cache.py` — `grib_run_dir(model, ref_dt)` context manager
+- Implemented in `collectors/grib_cache.py` — `grib_run_dir(model, ref_dt, grib_cache_dir)`
+  context manager. The module takes `grib_cache_dir` as an explicit parameter and never calls
+  `get_config()` itself — callers (`_icon_eps_base.py`'s `collect()` via `self._cfg()`,
+  `scheduler.py` via its own `get_config()`) resolve it. This is deliberate: a hidden
+  `get_config()` call inside this shared module once bypassed `test_e2e_collection.py`'s
+  module-scoped `get_config` monkeypatch and broke CI (see `.ai/RESUME.md` v0.3.39) — keep it
+  a pure function of its arguments.
 - On context entry: purges directories from previous ref_dt (old run cleanup), creates/reuses current dir
 - On context exit: **does NOT delete** — files survive container restarts if ref_dt hasn't changed
 - Cache-hit check in `_fetch_step()`: `dest.exists() and dest.stat().st_size > 1024` → skip HTTP
 - Corrupt-file guard: if eccodes fails to parse, `dest.unlink(missing_ok=True)` → re-downloaded next start
+- `log_startup_status(grib_cache_dir)` logs the resolved directory and warns (WARNING) if free
+  space is below 550 GB — a CH2 run alone can peak in the hundreds of GB there today (disk
+  peak reduction is partial: `W` deletes immediately after read since the grid build never
+  needs it; `U`/`V` still persist until the grid build's own later pass — see P0-4.2 in
+  `.ai/RESUME.md` for why the full fix needs more than a one-line change).
+
+---
+
+## Collector architecture — shared base class
+
+`icon_ch1_eps.py` and `icon_ch2_eps.py` were ~81% identical code (STAC search, GRIB parsing,
+ensemble stats, station/grid building). As of the tech-debt remediation pass, everything
+genuinely shared lives in `collectors/_icon_eps_base.py`'s `IconEpsCollectorBase`, and each
+model's module keeps only what's genuinely model-specific:
+
+- Class attributes: `COLLECTION`, `MODEL_TAG` (`"ch1"`/`"ch2"` — telemetry/collection_state
+  key), `MODEL_NAME` (`"icon-ch1"`/`"icon-ch2"` — stamped into responses), `ACCUM_PRIOR_H`
+  (`None` for CH1, `33` for CH2 — CH1 starts at h0 where the accumulation baseline is
+  genuinely zero; CH2 needs a shadow h33 fetch), `REF_DT_GUARD_HOURS`, `GRID_CONSTANTS_PREFIX`.
+- `HORIZONS` is a **property**, not a plain attribute — it forwards to the subclass module's
+  own `HORIZONS` global so `monkeypatch.setattr(ch1_mod, "HORIZONS", [...])` in tests still
+  works (a plain class attribute would snapshot the list at class-definition time).
+- `_cfg()`/`_compute_ref_dt()` are small per-subclass accessor methods for the same reason —
+  they resolve `get_config()`/`_latest_ref_dt()` via the subclass module's own namespace, which
+  is what tests actually monkeypatch (`ch1_mod.get_config`, `ch1_mod.datetime`).
+- Grid KD-tree / sample-indices / model-level-height singletons stay **module-level globals in
+  each subclass module**, not base-class instance state — CH1 (1.1 km) and CH2 (2.2 km) build
+  genuinely different grids, and `test_e2e_collection.py` resets them via direct
+  module-attribute access (`ch1_mod._GRID_TREE = None`). `_ensure_grid`/`collect_grid` stay
+  defined per-subclass for the same reason; the base class reaches that state through small
+  accessor methods (`_grid_tree()`, `_grid_level_heights()`).
+
+**If you add a third model or touch this indirection**: any state or config a test needs to
+monkeypatch must live in the *subclass* module's own namespace, resolved through a per-subclass
+method — never call `get_config()`, `datetime.now()`, etc. directly from `_icon_eps_base.py`
+itself, since that bypasses every test's module-scoped monkeypatch.
 
 ---
 
 ## SQLite Tables
 
-| Table | Key columns |
+**No tables exist yet.** `init_db()` deliberately does not import `database/models.py` or call
+`Base.metadata.create_all()` — v0.4 (Recipes) hasn't started, and creating empty tables every
+boot for a feature nothing queries was tracked tech debt (P2-10), resolved by not creating them
+until that work actually begins. `database/models.py` still defines the planned schema below
+as the v0.4 blueprint; re-add the import + `create_all()` call in `init_db()` when that work
+starts.
+
+| Table (planned, v0.4) | Key columns |
 |---|---|
 | `recipes` | `id`, `name`, `station_id` (nullable — NULL = global), `description`, `active`, `created_at` |
 | `recipe_rules` | `id`, `recipe_id` (FK → recipes), `variable`, `correction_type` (additive\|multiplicative), `value`, `condition_json` |
 
-SQLite is used exclusively for relational data (recipes). Forecast data is never written here. There is no users table — the service is unauthenticated.
+SQLite is reserved exclusively for relational data (recipes) — forecast data is never written
+here. There is no users table — the service is unauthenticated. Note the DB path
+(`sqlite:///lsmfapi.db`) is CWD-relative and **not** on the persisted `./data` volume — revisit
+this when v0.4 actually starts writing real data (currently moot since no tables exist).
 
 [Document every table here as it is added. This is the source of truth for the data model.]
 
@@ -416,6 +469,23 @@ No authentication. All endpoints are open — access is controlled at the networ
 
 [Add all routes here as they are implemented, grouped by router domain.]
 
+### Health & error handling
+
+- `GET /health` → `{"status": "ok"|"degraded", "service", "version", "uptime_seconds",
+  "checks": {"sqlite": "ok"|"unreachable", "scheduler": "running (N jobs)"|"stopped",
+  "cache": "warm (age Xs)"|"warm"|"cold"}}`. Returns `503` only when SQLite is unreachable or
+  the scheduler is stopped — a stale-but-serving cache is intentional behaviour and never
+  contributes to the status. `version` comes from `importlib.metadata`, not a hardcoded string.
+- **Every error response** (validation failures, 404s, 502s from the Lenticularis proxy,
+  unhandled exceptions) normalizes to `{"error": {"code", "message", "details"?}}` via
+  `main.py`'s `StarletteHTTPException`/`RequestValidationError`/bare-`Exception` handlers — see
+  `07-api-conventions.md`. Never put raw exception text or an upstream URL in a response body;
+  log it and return a generic message instead.
+- `/api/dashboard`'s `recent_errors` are **aggregated by `(method, path, status, detail)`**,
+  not a raw append log — each entry carries `first_seen`/`last_seen`/`count`. `requests`
+  reports `error_count` (5xx + collector/download failures) separately from
+  `client_error_count` (4xx, routine).
+
 ---
 
 ## Deployment
@@ -435,12 +505,17 @@ When a container is on multiple Docker networks, add `traefik.docker.network=pro
 
 ### Healthcheck
 
-`python:3.11-slim` does not include `curl`. Use Python stdlib:
+`python:3.11-slim` does not include `curl`. Use Python stdlib. Defined **once**, in the
+`Dockerfile` only — compose files must not redeclare it (a container inherits the image's
+`HEALTHCHECK` automatically; a duplicate copy is just one more place to drift out of sync):
 
-```yaml
-healthcheck:
-  test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/')\""]
+```dockerfile
+HEALTHCHECK --interval=10s --timeout=5s --retries=2 --start-period=60s \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
 ```
+
+`start-period=60s` (not 10s): `load_cache()` JSON-parses ~170 MB and loads two npz files
+before uvicorn serves anything.
 
 ### Dev Overlay
 

@@ -40,8 +40,11 @@ All configuration lives in `config.yml` (gitignored — copy from `config.yml.ex
 | `meteoswiss` | `ch1eps_collection` | ICON-CH1-EPS collection ID |
 | `meteoswiss` | `ch2eps_collection` | ICON-CH2-EPS collection ID |
 | `lenticularis` | `base_url` | Lenticularis API base URL (station list) |
+| — | `grib_cache_dir` | Where downloaded GRIB2 files persist (default: `/tmp/lsmfapi_grib`) — bind-mount this onto a volume with headroom, a CH2 run can peak in the hundreds of GB |
 
-Never read `os.environ` directly in code — all configuration goes through `get_config()`.
+Unknown keys are rejected at startup (`extra="forbid"`), and a missing `config.yml` fails fast
+with a clear log line rather than booting "healthy" with no config. Never read `os.environ`
+directly in code — all configuration goes through `get_config()`.
 
 ---
 
@@ -59,8 +62,8 @@ No authentication. All endpoints are open — access is controlled at the networ
 | GET | `/api/forecast/thermal-grid` | ~1 km thermal/convection grid (solar, sunshine, cloud covers, freezing level, CAPE, CIN, LCL, LFC, TKE). Params: `bbox`, `stride_km` |
 | GET | `/api/stations` | Proxy to Lenticularis station list (CORS-safe) |
 | GET | `/data` | Data Inspector GUI — query station, altitude-wind, and thermal-grid endpoints |
-| GET | `/health` | Service health + cache key counts |
-| GET | `/dashboard` | Operational dashboard: live collection status, cache state, error log |
+| GET | `/health` | Real subsystem checks (SQLite, scheduler, cache) — `503` if SQLite is unreachable or the scheduler is stopped; a merely stale cache is not an error |
+| GET | `/dashboard` | Operational dashboard: live collection status, cache state, error log (aggregated, not a raw feed) |
 
 **Grid response limits.** `/wind-grid` and `/thermal-grid` return one value list per point per frame, so a fine `stride_km` over the full domain can be enormous. Requests exceeding 10 million values (`points × frames × fields`) are rejected with `400 response_too_large` — increase `stride_km` or request a smaller `bbox`. Accepted `stride_km`: 1, 2, 5, 10 (default 10). `bbox` is `lat_min,lat_max,lon_min,lon_max` within the ICON-CH1 domain.
 
@@ -87,7 +90,7 @@ The station response carries surface weather only. Solar, cloud, and convection 
 |---|---|---|
 | `wind_speed` | km/h | 10 m wind speed |
 | `wind_gust` | km/h | 10 m wind gusts (max in step) |
-| `wind_direction` | degrees | 10 m wind direction (0/360 = N) |
+| `wind_direction` | degrees | 10 m wind direction (0/360 = N). `_min`/`_max` use circular statistics, not plain min/max — members straddling 0°/360° report their true spread, not a false ~360° one |
 | `temperature` | °C | 2 m air temperature |
 | `humidity` | % | 2 m relative humidity (computed from TD_2M via Magnus formula) |
 | `pressure_qff` | hPa | Sea-level pressure (QFF reduction) |
@@ -151,8 +154,8 @@ Container startup
   → Trigger background collection run to warm in-memory cache
 
 MeteoSwiss STAC API → GRIB2 files (one per variable per step)
-  → Persistent GRIB cache: /tmp/lsmfapi_grib/{model}/{ref_dt}/ (skip re-downloads on restart)
-  → cfgrib + xarray: decode all ensemble members
+  → Persistent GRIB cache: {grib_cache_dir}/{model}/{ref_dt}/ (skip re-downloads on restart)
+  → Raw eccodes API: decode all ensemble members (no cfgrib/xarray — removed, unused)
   → De-accumulate precipitation, radiation, sunshine
   → Compute RH from TD_2M (dew point) + T_2M via Magnus formula
   → Ensemble engine: median, min, max across all members × runs
@@ -181,9 +184,10 @@ src/lsmfapi/
 │       └── dashboard.py     # GET /dashboard + /api/dashboard + /data (Data Inspector) + /api/stations proxy
 ├── collectors/
 │   ├── base.py              # Abstract base + async download helper
-│   ├── grib_cache.py        # grib_run_dir() context manager; persistent GRIB files in /tmp
-│   ├── icon_ch1_eps.py      # ICON-CH1-EPS ingestor (h0–h33, 1h steps, ~10 members)
-│   └── icon_ch2_eps.py      # ICON-CH2-EPS ingestor (h34–h120, 1h steps, ~21 members)
+│   ├── grib_cache.py        # grib_run_dir() context manager; persistent GRIB files, configurable dir
+│   ├── _icon_eps_base.py    # Shared STAC/GRIB/ensemble pipeline (CH1/CH2 are 81% identical code)
+│   ├── icon_ch1_eps.py      # ICON-CH1-EPS: thin subclass (h0–h33, 1h steps, ~10 members)
+│   └── icon_ch2_eps.py      # ICON-CH2-EPS: thin subclass (h34–h120, 1h steps, ~21 members)
 ├── database/
 │   ├── cache.py             # In-memory cache: station + altitude dicts + combined float16 grid store
 │   ├── collection_state.py  # Runtime collection state (status, files_done, files_ok)
@@ -220,7 +224,14 @@ Together with the grid response cap, this keeps peak service RAM around ~2 GB (p
 
 ### GRIB file persistence
 
-GRIB files are stored in `/tmp/lsmfapi_grib/{model}/{YYYYMMDDTHHMMZ}/` (not a throwaway temp dir). Files survive container restarts: if the `ref_dt` hasn't changed, previously downloaded files are reused. When the `ref_dt` advances (new model run), old directories are deleted automatically on the next collector start. Corrupt files (eccodes parse failure) are deleted immediately so they are re-downloaded on the next run.
+GRIB files are stored in `{grib_cache_dir}/{model}/{YYYYMMDDTHHMMZ}/` (default
+`/tmp/lsmfapi_grib`, configurable — bind-mount it onto a volume with headroom, not the
+container's writable layer). Files survive container restarts: if the `ref_dt` hasn't
+changed, previously downloaded files are reused. When the `ref_dt` advances (new model run),
+old directories are deleted automatically on the next collector start. Corrupt files (eccodes
+parse failure) are deleted immediately so they are re-downloaded on the next run. Startup logs
+the resolved directory and warn if the volume has less than 550 GB free — a CH2 run alone can
+peak in the hundreds of GB there today (a known, tracked inefficiency — see Roadmap).
 
 ### eccodes stack
 
@@ -364,6 +375,52 @@ Fixes a PRD crash loop and a 10-week CI outage that shared one root cause: there
 - `collect_grid()` ran synchronously inside `async def collect()`, holding the event loop for the whole grid build — uvicorn served nothing, `/health` included, so the healthcheck failed and Traefik dropped the container. Measured on PRD: a 7m48s silent gap; CH2 (87 horizons) is ~20 min. Roughly 1.5–2h of dead UI per day across the 8 collection windows.
 - Fixed with `await asyncio.to_thread(self.collect_grid, ...)` in both collectors — eccodes and numpy release the GIL, so the API keeps serving during collection.
 - Latent since the grid feature landed; only visible once v0.3.4 let a collection finish instead of crash-looping.
+
+### v0.3.6 — Altitude winds fixed ✅ Shipped
+
+Altitude winds (and the wind grid at every level) had been silently wrong since launch: the
+EPS `U`/`V`/`W` files carry ~80 raw model levels with no pressure coordinate, so the old
+altitude→pressure mapping collapsed every band onto the same array index — all-null or
+identical winds at every height. Fixed by interpolating to true geometric height (MAMSL) using
+the static HHL constants instead. Same 9-band API contract, now genuinely correct and distinct
+per height.
+
+### v0.3.7 — CH2 scheduler misfire fixed ✅ Shipped
+
+APScheduler's default misfire grace time was tight enough that a few seconds of executor
+jitter (CH2's own long collection run perturbing the loop) made it skip the trigger outright
+rather than run late — leaving the dashboard showing a stale CH2 cache for up to 6 hours with
+no error anywhere. Fixed with a 30-minute misfire grace time; safe because the target run is
+always computed from wall-clock time, not the cron slot that fired it.
+
+### v0.3.8 – v0.3.39 — Tech-debt remediation pass ✅ Shipped
+
+A full audit (`specs/001-tech-debt-remediation/plan.md`) covering security, reliability, CI,
+and code quality, worked through top to bottom:
+
+- **Security**: stored XSS in the operator dashboard fixed; TLS verification restored on all
+  4 HTTPS clients.
+- **Reliability**: cache persistence and GRIB parsing/station-building moved off the event
+  loop (nothing blocks `/health` anymore); `/health` does real subsystem checks and can return
+  `503`; the dashboard's error log aggregates instead of drowning in repeat noise; unhandled
+  exceptions are caught, logged, and surfaced instead of vanishing; a STAC search edge case
+  that could stitch two model runs together is closed; two silent-fallback bugs fixed (one a
+  ~34× precipitation overstatement risk on a rare failure path).
+- **Config**: `config.yml` untracked from git (was accidentally committed); unknown config
+  keys now rejected at startup instead of silently ignored; the GRIB cache directory is now
+  configurable with a startup low-space warning.
+- **CI/quality**: releases are now gated on a green integration test (previously a tag push
+  could publish on a red test); added a fast unit-test lane and linting (previously
+  unenforced); added Dependabot; pinned the Docker base image and Poetry version; removed
+  unused dependencies.
+- **Structural**: the two collectors were 81% duplicate code — extracted into one shared base
+  class, cutting each collector down to its genuinely model-specific ~200 lines.
+
+Two items were investigated and deliberately deferred rather than rushed: fully eliminating
+the GRIB cache's multi-hundred-GB disk peak (the safe fix requires interleaving grid
+computation with the download phase — a bigger rewrite than a quick patch, see `.ai/RESUME.md`
+for the full reasoning), and reducing STAC search call volume by ~34–87× (requires
+restructuring the per-variable/horizon fetch pattern).
 
 ### v0.4 — Recipes
 
