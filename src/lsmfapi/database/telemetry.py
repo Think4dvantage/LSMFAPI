@@ -11,6 +11,11 @@ _started_at: str = datetime.now(timezone.utc).isoformat()
 _recent_errors: deque[dict[str, Any]] = deque(maxlen=20)
 
 
+def _sanitize(s: str) -> str:
+    """Strip markup so the error ring can never carry HTML, regardless of caller."""
+    return s.replace("<", "&lt;").replace(">", "&gt;")
+
+
 def record_request(method: str, path: str) -> None:
     global _request_count
     _request_count += 1
@@ -22,9 +27,9 @@ def record_error(method: str, path: str, status_code: int, detail: str) -> None:
     _recent_errors.append({
         "ts": datetime.now(timezone.utc).isoformat(),
         "method": method,
-        "path": path,
+        "path": _sanitize(path[:400]),
         "status": status_code,
-        "detail": detail[:400],
+        "detail": _sanitize(detail[:400]),
     })
     logger.debug("Telemetry error recorded: %s %s → %d", method, path, status_code)
 
@@ -37,7 +42,7 @@ def record_download_error(model: str, variable: str, horizon_h: int, error_msg: 
         "method": model.upper(),
         "path": f"{variable} h+{horizon_h}",
         "status": "DL-ERR",
-        "detail": error_msg[:400],
+        "detail": _sanitize(error_msg[:400]),
     })
     logger.debug("Telemetry download error recorded: %s %s h+%d", model, variable, horizon_h)
 

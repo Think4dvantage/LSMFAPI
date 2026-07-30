@@ -5,6 +5,9 @@ let refreshTimer = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
 function setText(id, val) {
   const el = document.getElementById(id);
   if (el) el.textContent = val ?? "—";
@@ -49,8 +52,8 @@ function modelRows(fields) {
   return fields
     .map(([label, value]) => `
       <div class="model-row">
-        <span class="model-row-label">${label}</span>
-        <span>${value ?? "—"}</span>
+        <span class="model-row-label">${escapeHtml(label)}</span>
+        <span>${value == null ? "—" : escapeHtml(value)}</span>
       </div>`)
     .join("");
 }
@@ -284,11 +287,11 @@ function renderErrors(errors) {
   tableEl.style.display = "";
   tbody.innerHTML = [...errors].reverse().map(e => `
     <tr>
-      <td style="white-space:nowrap;">${fmtDt(e.ts)}</td>
-      <td>${e.method}</td>
-      <td style="font-family:monospace;font-size:12px;">${e.path}</td>
-      <td><span class="badge badge-err">${e.status}</span></td>
-      <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;">${e.detail ?? ""}</td>
+      <td style="white-space:nowrap;">${escapeHtml(fmtDt(e.ts))}</td>
+      <td>${escapeHtml(e.method)}</td>
+      <td style="font-family:monospace;font-size:12px;">${escapeHtml(e.path)}</td>
+      <td><span class="badge badge-err">${escapeHtml(e.status)}</span></td>
+      <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;">${escapeHtml(e.detail ?? "")}</td>
     </tr>`).join("");
 }
 

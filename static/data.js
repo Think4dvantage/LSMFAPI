@@ -1,5 +1,8 @@
 "use strict";
 
+const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
 // Tab switching
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
@@ -22,7 +25,7 @@ async function loadStations() {
     const stations = await fetch("/api/stations").then(r => r.json());
     console.log(`[App:data] loaded ${stations.length} stations in ${(performance.now() - t0).toFixed(0)} ms`);
     select.innerHTML = stations
-      .map(s => `<option value="${s.station_id}">${s.name ?? s.station_id}</option>`)
+      .map(s => `<option value="${escapeHtml(s.station_id)}">${escapeHtml(s.name ?? s.station_id)}</option>`)
       .join("");
     document.getElementById("station-load-btn").disabled = false;
   } catch (err) {

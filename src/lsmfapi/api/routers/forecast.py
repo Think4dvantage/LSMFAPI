@@ -71,9 +71,17 @@ def _to_nullable(row: np.ndarray) -> list[float | None]:
     return [None if math.isnan(v) else v for v in vals]
 
 
+_STATION_ID_PATTERN = r"^[A-Za-z0-9_.\-]+$"
+
+
 @router.get("/station", response_model=StationForecastResponse)
 async def station_forecast(
-    station_id: str = Query(..., description="Station identifier, e.g. meteoswiss-BER"),
+    station_id: str = Query(
+        ...,
+        max_length=64,
+        pattern=_STATION_ID_PATTERN,
+        description="Station identifier, e.g. meteoswiss-BER",
+    ),
     hours: int = Query(120, ge=1, le=120, description="Forecast horizon (1–120 h)"),
 ) -> StationForecastResponse:
     """Return surface-weather ensemble forecast for one station.
@@ -87,7 +95,13 @@ async def station_forecast(
         if cache_is_warm():
             raise HTTPException(
                 status_code=404,
-                detail={"error": {"code": "station_not_found", "message": f"Unknown station: {station_id}"}},
+                detail={
+                    "error": {
+                        "code": "station_not_found",
+                        "message": "Unknown station",
+                        "details": {"station_id": station_id},
+                    }
+                },
             )
         raise HTTPException(
             status_code=503,
@@ -100,7 +114,7 @@ async def station_forecast(
 
 @router.get("/altitude-winds", response_model=AltitudeWindsResponse)
 async def altitude_winds(
-    station_id: str = Query(..., description="Station identifier"),
+    station_id: str = Query(..., max_length=64, pattern=_STATION_ID_PATTERN, description="Station identifier"),
     hours: int = Query(120, ge=1, le=120, description="Forecast horizon (1–120 h)"),
 ) -> AltitudeWindsResponse:
     """Return vertical wind profiles (500–5000 m ASL) for one station.
@@ -114,7 +128,13 @@ async def altitude_winds(
         if cache_is_warm():
             raise HTTPException(
                 status_code=404,
-                detail={"error": {"code": "station_not_found", "message": f"Unknown station: {station_id}"}},
+                detail={
+                    "error": {
+                        "code": "station_not_found",
+                        "message": "Unknown station",
+                        "details": {"station_id": station_id},
+                    }
+                },
             )
         raise HTTPException(
             status_code=503,
