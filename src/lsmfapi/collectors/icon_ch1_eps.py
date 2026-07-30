@@ -846,8 +846,15 @@ class IconCh1EpsCollector(BaseCollector):
         horizon_h: int,
         station_flat_indices: np.ndarray,
         tmpdir: Path,
+        delete_after_read: bool = False,
     ) -> np.ndarray | None:
-        """Download one (variable, horizon) GRIB, extract station values, return array."""
+        """Download one (variable, horizon) GRIB, extract station values, return array.
+
+        delete_after_read=True for variables the grid build never reads (currently just
+        "W", ~1.8 GB/file) — deletes right after this read instead of leaving it on disk
+        until every horizon has downloaded, which is what actually drives the multi-hundred-
+        GB peak (see P0-4 in specs/001-tech-debt-remediation/plan.md).
+        """
         cfg = get_config()
         async with semaphore:
             try:
@@ -887,6 +894,9 @@ class IconCh1EpsCollector(BaseCollector):
             dest.unlink(missing_ok=True)
             _telemetry.record_download_error("ch1", variable, horizon_h, f"eccodes: {exc}")
             return None
+        finally:
+            if delete_after_read:
+                dest.unlink(missing_ok=True)
 
     def collect_grid(
         self,
@@ -973,6 +983,7 @@ class IconCh1EpsCollector(BaseCollector):
                     try:
                         result = await self._fetch_step(
                             semaphore, client, ref_dt, var, h, station_flat_indices, tmpdir,
+                            delete_after_read=(var == "W"),
                         )
                         return result
                     finally:
@@ -1064,12 +1075,9 @@ class IconCh1EpsCollector(BaseCollector):
             u_pl = pres_array("U")
             v_pl = pres_array("V")
             w_pl = pres_array("W")
-
-            # W's 3D files are the largest (~1.8 GB each) and nothing re-reads them from disk
-            # (only the in-memory w_pl above is used — the grid build reads U/V/T_2M/TD_2M).
-            # Delete them now so they don't linger in the GRIB cache; U/V stay for the grid.
-            for _wh in HORIZONS:
-                (tmpdir / f"W_{_wh:03d}.grib2").unlink(missing_ok=True)
+            # W's 3D files (~1.8 GB each) are now deleted per-horizon by _fetch_step's
+            # delete_after_read=True as soon as each is downloaded and station-extracted,
+            # instead of all HORIZONS worth lingering on disk until this point.
 
             def deaccum(arr: np.ndarray) -> np.ndarray:
                 out = np.empty_like(arr)

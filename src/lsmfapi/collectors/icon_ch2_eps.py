@@ -170,7 +170,11 @@ class IconCh2EpsCollector(BaseCollector):
         horizon_h: int,
         station_flat_indices: np.ndarray,
         tmpdir: Path,
+        delete_after_read: bool = False,
     ) -> np.ndarray | None:
+        """delete_after_read=True for variables the grid build never reads (currently
+        just "W", ~1.8 GB/file) — see icon_ch1_eps.py's _fetch_step for the full rationale.
+        """
         cfg = get_config()
         async with semaphore:
             try:
@@ -210,6 +214,9 @@ class IconCh2EpsCollector(BaseCollector):
             dest.unlink(missing_ok=True)
             _telemetry.record_download_error("ch2", variable, horizon_h, f"eccodes: {exc}")
             return None
+        finally:
+            if delete_after_read:
+                dest.unlink(missing_ok=True)
 
     async def collect(self) -> None:  # noqa: C901
         ref_dt = _latest_ref_dt_ch2()
@@ -266,6 +273,7 @@ class IconCh2EpsCollector(BaseCollector):
                     try:
                         result = await self._fetch_step(
                             semaphore, client, ref_dt, var, h, station_flat_indices, tmpdir,
+                            delete_after_read=(var == "W"),
                         )
                         return result
                     finally:
@@ -368,11 +376,9 @@ class IconCh2EpsCollector(BaseCollector):
             u_pl = pres_array("U")
             v_pl = pres_array("V")
             w_pl = pres_array("W")
-
-            # W's 3D files are the largest (~1.8 GB each) and nothing re-reads them from disk
-            # (the grid build reads U/V/T_2M/TD_2M). Delete now so they don't linger; U/V stay.
-            for _wh in HORIZONS:
-                (tmpdir / f"W_{_wh:03d}.grib2").unlink(missing_ok=True)
+            # W's 3D files (~1.8 GB each) are now deleted per-horizon by _fetch_step's
+            # delete_after_read=True as soon as each is downloaded and station-extracted,
+            # instead of all HORIZONS worth lingering on disk until this point.
 
             # NaN, not zero: if the h33 baseline fetch fails, the h34 delta must surface as
             # missing data, not as the full 34-hour accumulation misread as a 1-hour rate

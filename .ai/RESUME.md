@@ -697,6 +697,57 @@ passes; a deliberately missing GRIB file or STAC asset now produces a WARNING lo
 previously there was none; a forced grid-collection exception now appears in the dashboard's
 error panel.
 
+### v0.3.35 — P0-4.2 partial fix: W deleted immediately (U/V deferred, see below for why)
+
+**What I found tracing the real code, before touching anything**: the plan's literal P1-4
+suggestion — "extract station + grid-sample columns in one read inside `_fetch_step`, then
+`unlink()` immediately" — has a hidden problem for the pressure-level 3D vars (U, V, W).
+The grid builders (`_build_grid_wind_cache`/`_build_thermal_grid_cache`) process horizons
+**one at a time on purpose**, to keep memory bounded (their own docstrings say so). If
+`_fetch_step` stashed every horizon's grid-extracted array into a dict for the grid-builder to
+consume in its later, separate phase (as the plan's text implies), **CH1 alone would hold
+~26 GB of pressure-level grid arrays in memory simultaneously** (34 horizons × 2 vars ×
+~390 MB) — trading the ~200/480 GB disk-OOM this item exists to fix for a memory-OOM instead
+(this project already had a real OOM incident, v0.3.3). Worse: the integration test patches
+`HORIZONS` down to `[0, 6]` for speed, so this exact regression would go **green in CI** and
+only surface in production at full 34/87-horizon scale.
+
+**Discussed with the user** (twice — first on the general approach, then on this specific
+finding): confirmed doing the *actually* safe version, which requires interleaving grid
+computation with the download phase itself (compute-and-discard each horizon's grid arrays as
+soon as that horizon's data arrives, bounded by the existing `DOWNLOAD_CONCURRENCY` semaphore,
+instead of deferring all of it to a phase that runs after every file is already downloaded).
+That is a materially bigger rewrite than either the plan or the original ask scoped — it
+touches `_fetch_step`'s signature, the whole `fetch()`/`surf_tasks`/`pres_tasks` scheduling
+structure, and both grid-builder functions' entire data source, for both collectors.
+
+**What actually shipped this pass** — the safe subset with zero memory-risk, verified by
+tracing every reference:
+- `W` (the vertical-wind pressure variable) is used **only** by station-level altitude winds
+  (`pres_array("W")` → `w_pl`, read once from the in-memory task result) — confirmed the grid
+  build (`_build_grid_wind_cache`) only ever reads `U`/`V`/`T_2M`/`TD_2M`, never `W` (matches
+  the wind-grid having no vertical-wind field, per the P2-12 doc rewrite). So `W`'s file is
+  safe to delete **immediately** after its single station-level read — nothing else will ever
+  touch it.
+- `_fetch_step` gained `delete_after_read: bool = False`, set to `True` only for `"W"` in both
+  collectors' `fetch()` wrappers. Removed the now-redundant bulk `for _wh in HORIZONS: unlink
+  W` loop that previously ran *after* the entire download phase completed — that loop is what
+  let all of a run's `W` files (~1.8 GB each) sit on disk simultaneously in the first place.
+- Net effect: `W`'s contribution to the CH1 (~201 GB) / CH2 (~480 GB) peak — roughly a third
+  of it, since U/V/W are the three same-sized 3D variable types — is gone. `U`/`V` still
+  persist until the grid build's later separate read+delete, same as before.
+
+**Deliberately not done in this pass**: the `U`/`V` interleaving described above. This remains
+open, correctly understood now as materially larger in scope than "combine two reads into
+one," and needs its own dedicated design/implementation effort rather than being rushed
+through in an already very long session with zero ability to test against real GRIB data or
+real memory behavior.
+
+**Verify** (CI/PRD, the only real proof available): `du -sh` on the GRIB cache dir mid-run
+should show a visibly lower peak than before, with `W_*.grib2` files never accumulating past a
+handful at a time (bounded by `DOWNLOAD_CONCURRENCY`) regardless of how many horizons have
+been scheduled.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
