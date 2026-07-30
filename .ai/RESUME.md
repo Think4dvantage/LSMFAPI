@@ -893,6 +893,52 @@ test suite):
 **Verify** (CI): station-cache content unaffected (pure internal-representation change);
 memory profile should show measurably lower peak resident grid arrays for CH2 in particular.
 
+### v0.3.39 — CI regression found and fixed: the P0-4.1 config call bypassed test monkeypatching
+
+**Important process note**: this session made 30+ commits (v0.3.8 → v0.3.38) but only pushed to
+`origin` once, at the very end, when asked to "tag, commit, and push." That means CI never
+actually ran on any of this session's work until that single push — every "verify via CI"
+note in the entries above was aspirational until this point, not confirmed. When `git push`
++ the `v0.3.38` tag finally went out, **both CI runs failed in ~30s** — per
+`06-testing-conventions.md`'s own rule ("anything finishing under ~60s failed in setup"),
+that's a setup failure, not a real test run.
+
+**Root cause**: P0-4.1 (v0.3.14) changed `grib_cache.py`'s `_base_dir()` to call
+`get_config()` directly. `tests/test_e2e_collection.py`'s `reset_state` fixture does
+`monkeypatch.setattr(ch1_mod, "get_config", lambda: _cfg)` — this patches the name
+`get_config` **inside the `icon_ch1_eps` module's own namespace**, which is a separate
+binding from `grib_cache.py`'s own `from lsmfapi.config import get_config` import. Patching
+one does nothing to the other. So `grib_run_dir()` (called from `collect()`, which lives in
+`_icon_eps_base.py` since P3-5) hit the *real* `get_config()`, which tried to read
+`config.yml` from the CI runner's working directory — a file that, correctly, does not exist
+there — and raised `FileNotFoundError`, exactly the fail-fast behavior P1-7 added. The bug
+was real but the failure mode was the *test infrastructure* being bypassed, not a production
+issue: on a real host, `config.yml` exists, so `grib_cache.py`'s direct `get_config()` call
+would have worked fine — this only broke the *test's ability to run without one*.
+
+**Fix**: root-caused rather than patched — `grib_cache.py` no longer imports or calls
+`get_config()` at all. `grib_run_dir()`, `log_startup_status()`, `_run_dir()`, and
+`_purge_stale()` all now take `grib_cache_dir: str` as an explicit parameter. Callers supply
+it: `_icon_eps_base.py`'s `collect()` passes `self._cfg().grib_cache_dir` (which *is*
+correctly patchable, since `_cfg()` is the per-subclass indirection P3-5 built specifically
+for this reason); `scheduler.py` passes `get_config().grib_cache_dir` using its own,
+unpatched, real config call (scheduler.py was never part of this test's monkeypatch surface,
+so this is correct as-is). This is a strictly better design than a workaround — `grib_cache.py`
+is now a pure utility module with no hidden global-config dependency at all.
+
+**Verified locally** (this module needs no eccodes, unlike almost everything else this
+session): imported the real `lsmfapi.config`/`lsmfapi.collectors.grib_cache`, built a `Config`
+matching the test's exact construction, and ran the full `log_startup_status()` +
+`grib_run_dir()` call chain end-to-end with zero hidden config lookups. Also grepped every
+remaining `get_config()` call site in `src/` to confirm no other module has this same
+bypass-a-monkeypatch shape — all other call sites are either in the correctly-patchable
+per-subclass collector modules or in code paths this particular test doesn't exercise
+(`api/main.py`, `dashboard.py`).
+
+**Not yet re-verified by CI at time of writing** — `git push` + a fresh tag needed after this
+fix lands, and the actual CI run is the only real proof (see the next entry, if this session
+continues far enough to confirm it, or check `gh run list` in the next session if not).
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

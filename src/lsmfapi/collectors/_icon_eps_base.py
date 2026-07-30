@@ -903,7 +903,7 @@ class IconEpsCollectorBase(BaseCollector):
         ref_dt = self._compute_ref_dt()
         logger.info("%s.collect() ref_dt=%s", self.__class__.__name__, ref_dt.isoformat())
 
-        with grib_run_dir(self.MODEL_TAG, ref_dt) as tmpdir:
+        with grib_run_dir(self.MODEL_TAG, ref_dt, self._cfg().grib_cache_dir) as tmpdir:
 
             await self._ensure_grid(tmpdir)
             stations = await self._fetch_stations()
