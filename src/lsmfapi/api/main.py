@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 from importlib.metadata import version as pkg_version
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
@@ -67,6 +69,33 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
             return Response(content=body, status_code=response.status_code,
                             headers=headers, media_type=response.media_type)
         return response
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    # Routes that already raise HTTPException(detail={"error": {...}}) (the documented
+    # envelope, see 07-api-conventions.md) pass straight through instead of getting
+    # double-wrapped into FastAPI's default {"detail": {"error": {...}}} shape.
+    detail = exc.detail
+    if isinstance(detail, dict) and "error" in detail:
+        body = detail
+    else:
+        body = {"error": {"code": "http_error", "message": str(detail)}}
+    return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": {
+                "code": "validation_failed",
+                "message": "Request validation failed",
+                "details": {"errors": exc.errors()},
+            }
+        },
+        status_code=422,
+    )
 
 
 @app.exception_handler(Exception)

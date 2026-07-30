@@ -426,6 +426,36 @@ same pattern as `_interp_to_heights`. No `warnings.filterwarnings` blanket suppr
 to whatever's left after this and P2-9 (already applied) — any remaining warning is now
 something to actually look at.
 
+### v0.3.25 — P2-11 one error envelope, not four
+
+**Finding**: `_err()` in `forecast.py` returns the documented flat `{"error": {...}}`, but the
+`HTTPException(detail={"error": {...}})` paths (404/503 in `station_forecast`/
+`altitude_winds`) got double-wrapped by FastAPI's default handler into
+`{"detail": {"error": {...}}}`. `dashboard.py`'s `/api/stations` 502 was a third shape
+(`detail=str(exc)`, which also leaked the upstream Lenticularis URL into a public response).
+FastAPI's own 422 was a fourth. Four shapes, one documented contract
+(`07-api-conventions.md`).
+
+**Fix**:
+- `@app.exception_handler(StarletteHTTPException)` in `main.py`: if `exc.detail` is already a
+  dict carrying an `"error"` key, pass it straight through with the original status code
+  instead of letting it get re-wrapped; otherwise wrap a plain string detail into the same
+  envelope (`{"code": "http_error", "message": ...}`).
+- `@app.exception_handler(RequestValidationError)`: FastAPI's automatic 422s now return
+  `{"error": {"code": "validation_failed", "message": ..., "details": {"errors": [...]}}}`
+  instead of the framework default shape.
+- `dashboard.py`'s `/api/stations` proxy: logs the real `httpx.HTTPError` server-side
+  (`exc_info=True`) and raises a generic `{"error": {"code": "upstream_unavailable", ...}}` —
+  no more upstream URL/exception text in the public response body.
+- **Verified locally** with an isolated FastAPI `TestClient` (no eccodes needed — plain
+  fastapi/starlette, which this dev box does have) reproducing all three of the previously
+  different shapes and confirming they now all normalize to `{"error": {...}}`.
+
+**Verify** (pending CI/PRD): `?station_id=` for a real-but-unknown station now returns
+`{"error": {...}}` directly (not `{"detail": {"error": {...}}}`); a malformed query param
+returns the same envelope shape at 422; `/api/stations` with Lenticularis down returns a
+generic message with no URL leak, while the real error still appears in the logs.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

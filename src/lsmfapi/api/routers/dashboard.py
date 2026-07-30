@@ -1,3 +1,5 @@
+import logging
+
 import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -13,6 +15,8 @@ from lsmfapi.database.cache import (
 )
 from lsmfapi.database.collection_state import get_all_states
 from lsmfapi.database.telemetry import get_telemetry
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["dashboard"])
 
@@ -37,7 +41,11 @@ async def stations_proxy() -> list:
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            logger.error("Lenticularis /api/stations proxy failed: %s", exc, exc_info=True)
+            raise HTTPException(
+                status_code=502,
+                detail={"error": {"code": "upstream_unavailable", "message": "Station list unavailable"}},
+            ) from exc
 
 
 @router.get("/api/dashboard")
