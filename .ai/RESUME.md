@@ -231,6 +231,25 @@ in use from the logs alone — directly relevant given P1-6's dev/prod mixup.
 five values; deliberately introducing a typo'd key in `config.yml` now fails startup with a
 clear `ValidationError` instead of silently doing nothing.
 
+### v0.3.17 — P3-1 tagged releases can no longer ship on a red test
+
+**Finding**: `docker-publish.yml` triggers on `push.tags: ["v*"]`; `integration-test.yml`
+triggers on `push.branches: ["main"]` + PRs. GitHub's `push.branches` filter does not match tag
+refs, so a tag push runs **only** `docker-publish.yml` — no `workflow_run`, no `needs:`, no
+required status check ever gated it. The image, including the mutable `:latest` tag that
+`docker-compose.yml` pins the deployment to, published regardless of test state. This is not
+theoretical: CI was red for 10 weeks (2026-05-08 → 2026-07-16) and a broken eccodes stack
+reached PRD as `v0.3.3` during that window (see the v0.3.4 entry above).
+
+**Fix**: added a `test` job to `docker-publish.yml` (same steps as `integration-test.yml`
+— checkout, Python 3.11, `poetry install --with dev`, `pytest -m integration`) and made
+`build-and-push` depend on it via `needs: test`. Adds ~5 min to a release; that's the right
+trade. This is this project's safety net for the riskier collector-internals work still ahead
+(P0-4.2/P1-4/P3-5) — landing it first, per the plan's own sequencing.
+
+**Verify**: next tag push shows the `test` job running before `build-and-push` starts; a
+deliberately failing test on a tag blocks the image from publishing.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

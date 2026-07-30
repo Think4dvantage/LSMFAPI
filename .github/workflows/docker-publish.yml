@@ -10,7 +10,30 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # push.branches never matches a tag ref, so integration-test.yml does not run for a
+  # tag push — without this job, a red integration test never blocked a release.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install --with dev
+
+      - name: Run integration test
+        run: poetry run pytest -m integration -v --tb=short
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
