@@ -619,6 +619,44 @@ both collectors.
 watch for the new WARNING log line if MeteoSwiss's STAC catalog ever does return >1 asset for
 a single (variable, horizon, ref_dt) query.
 
+### v0.3.33 — P1-11 two silent-fallback bugs fixed, stale Known Issue deleted
+
+**Finding 1 (real bug)**: CH2's `_get_prior(var)` — the deaccumulation baseline for the h34
+delta — fell back to `np.zeros(...)` (misleadingly named `nan_prior`; it was never NaN) on
+*any* failure of the shadow h33 fetch (task missing, cancelled, exception, shape mismatch),
+with **no log and no telemetry**. A zero baseline means h34's delta = the *full 34-hour*
+accumulated total misread as a 1-hour rate — precipitation up to **~34× too high**, silently.
+
+**Fix 1**: renamed to `_prior_fallback`, now genuinely NaN. Every fallback path now logs
+WARNING (naming the variable) and calls `_telemetry.record_download_error` before returning
+it, so a failure surfaces as `null` downstream (matching how every other missing-data case in
+this codebase behaves) instead of a plausible-looking wrong number with no trace anywhere.
+
+**Finding 2 (related, same area)**: CH1's thermal-grid solar/sunshine baseline
+(`prev_aswdir`/`prev_aswdifd`/`prev_dursun`, used by both CH1 and CH2 via the shared
+`_build_thermal_grid_cache`) only advanced *inside* the success branch of each per-horizon
+`if raw is not None` check. A single missing horizon left the baseline stale — the *next*
+successful horizon's delta then silently spanned 2 hours of accumulation while being divided
+by 3600 as if it were 1 hour, double-counting solar/sunshine. The per-station path already
+yields NaN in this exact situation (via the shared `_deaccumulate` helper's own NaN-propagation
+behaviour), so grid and station outputs diverged.
+
+**Fix 2**: added explicit `aswdir_baseline_ok`/`aswdifd_baseline_ok`/`dursun_baseline_ok` flags.
+A missing horizon now flips the relevant flag(s) to `False`, which makes the *next* step's
+cache row stay NaN too (both a WARNING log line and telemetry weren't added here — the plan
+only asked for it on P1-11's CH2 finding — but a WARNING log was added since it's the same
+"silent" class of bug) instead of silently computing a doubled value. The `True` baseline for
+true model start (h0, no `accum_prior_h`) is unaffected.
+
+**Also**: deleted `features.md`'s stale "Known Issues" entry claiming `sunshine_minutes` is
+wrong on CH2's first step — verified `ACCUM_PRIOR_H` (`icon_ch2_eps.py:75`) + the shadow h33
+fetch + `deaccum`'s prior-differencing already handle this correctly. The entry pre-dated that
+fix and was never removed.
+
+**Verify** (CI/PRD): deliberately fail the h33 shadow fetch (or a mid-run horizon) and confirm
+the affected step(s) come back `null` with a WARNING log line and (for CH2) a telemetry entry,
+rather than a plausible-but-wrong number with no trace.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

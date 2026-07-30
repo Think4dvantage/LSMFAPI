@@ -504,11 +504,20 @@ def _build_thermal_grid_cache(
         prev_aswdifd = _read("ASWDIFD_S", accum_prior_h)
         prev_dursun  = _read("DURSUN",    accum_prior_h)
 
+    # True once a real baseline exists: either the accum_prior_h fetch above succeeded, or
+    # there's no accum_prior_h and we're at true model start, where baseline 0 is correct.
+    # A missing horizon must flip this back to False — otherwise the next successful step
+    # would silently difference against a stale (2-hour-old) baseline, reading ~2x too high
+    # instead of surfacing as the null the station path already yields in this situation.
+    aswdir_baseline_ok = accum_prior_h is None or prev_aswdir is not None
+    aswdifd_baseline_ok = accum_prior_h is None or prev_aswdifd is not None
+    dursun_baseline_ok = accum_prior_h is None or prev_dursun is not None
+
     for h_idx, h in enumerate(horizons):
         # --- accumulated: solar radiation ---
         raw_dir  = _read("ASWDIR_S",  h)
         raw_difd = _read("ASWDIFD_S", h)
-        if raw_dir is not None and raw_difd is not None:
+        if raw_dir is not None and raw_difd is not None and aswdir_baseline_ok and aswdifd_baseline_ok:
             delta_dir  = raw_dir  - (prev_aswdir  if prev_aswdir  is not None else 0.0)
             delta_difd = raw_difd - (prev_aswdifd if prev_aswdifd is not None else 0.0)
             solar_w_m2 = np.clip(delta_dir + delta_difd, 0.0, None) / 3600.0  # J/m² → W/m²
@@ -517,16 +526,32 @@ def _build_thermal_grid_cache(
             solar_max_cache[h_idx] = _nanmax(solar_w_m2)
             prev_aswdir  = raw_dir
             prev_aswdifd = raw_difd
+            aswdir_baseline_ok = aswdifd_baseline_ok = True
+        else:
+            if raw_dir is None or raw_difd is None:
+                logger.warning(
+                    "%s thermal-grid solar baseline gap at h=%d — this and the next step's "
+                    "delta are null rather than risk a doubled value", model, h,
+                )
+            aswdir_baseline_ok = aswdifd_baseline_ok = False
 
         # --- accumulated: sunshine ---
         raw_dursun = _read("DURSUN", h)
-        if raw_dursun is not None:
+        if raw_dursun is not None and dursun_baseline_ok:
             delta_dursun = raw_dursun - (prev_dursun if prev_dursun is not None else 0.0)
             sunshine_min = np.clip(delta_dursun, 0.0, None) / 60.0  # s → min
             sunshine_cache[h_idx]     = _median(sunshine_min)
             sunshine_min_cache[h_idx] = _nanmin(sunshine_min)
             sunshine_max_cache[h_idx] = _nanmax(sunshine_min)
             prev_dursun = raw_dursun
+            dursun_baseline_ok = True
+        else:
+            if raw_dursun is None:
+                logger.warning(
+                    "%s thermal-grid sunshine baseline gap at h=%d — this and the next step's "
+                    "delta are null rather than risk a doubled value", model, h,
+                )
+            dursun_baseline_ok = False
 
         # --- instantaneous surface fields ---
         for arr, med_cache, min_cache, max_cache in (

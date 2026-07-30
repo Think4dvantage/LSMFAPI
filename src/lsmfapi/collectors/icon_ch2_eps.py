@@ -373,21 +373,34 @@ class IconCh2EpsCollector(BaseCollector):
             for _wh in HORIZONS:
                 (tmpdir / f"W_{_wh:03d}.grib2").unlink(missing_ok=True)
 
-            nan_prior = np.zeros((_n_members, n_stations))
+            # NaN, not zero: if the h33 baseline fetch fails, the h34 delta must surface as
+            # missing data, not as the full 34-hour accumulation misread as a 1-hour rate
+            # (~34x too high for precipitation).
+            _prior_fallback = np.full((_n_members, n_stations), np.nan)
 
             def _get_prior(var: str) -> np.ndarray:
                 t = prior_tasks.get(var)
                 if t is None or t.cancelled():
-                    return nan_prior
+                    logger.warning(
+                        "CH2 deaccumulation baseline missing for %s (h%d fetch missing/cancelled) "
+                        "— h%d delta will be null, not a wrong number",
+                        var, ACCUM_PRIOR_H, HORIZONS[0],
+                    )
+                    _telemetry.record_download_error("ch2", var, ACCUM_PRIOR_H, "prior fetch missing/cancelled")
+                    return _prior_fallback
                 try:
                     r = t.result()
-                except Exception:
-                    return nan_prior
+                except Exception as exc:
+                    logger.warning("CH2 deaccumulation baseline fetch failed for %s: %s", var, exc)
+                    _telemetry.record_download_error("ch2", var, ACCUM_PRIOR_H, f"prior fetch failed: {exc}")
+                    return _prior_fallback
                 if isinstance(r, np.ndarray) and r.ndim == 3:
                     r = r[:, -1, :]
-                if isinstance(r, np.ndarray) and r.shape == nan_prior.shape:
+                if isinstance(r, np.ndarray) and r.shape == _prior_fallback.shape:
                     return r
-                return nan_prior
+                logger.warning("CH2 deaccumulation baseline for %s has an unexpected shape — using null fallback", var)
+                _telemetry.record_download_error("ch2", var, ACCUM_PRIOR_H, "prior fetch shape mismatch")
+                return _prior_fallback
 
             def deaccum(arr: np.ndarray, var: str) -> np.ndarray:
                 prior = _get_prior(var)
