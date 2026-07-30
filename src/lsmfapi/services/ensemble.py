@@ -11,6 +11,11 @@ class EnsembleStats(TypedDict):
 
 def compute_stats(values: list[float]) -> EnsembleStats:
     arr = np.array(values, dtype=float)
+    if np.all(np.isnan(arr)):
+        # An all-NaN ensemble is expected (e.g. every member failed for this step) — skip
+        # the reducers entirely rather than let them warn on a slice with nothing valid.
+        nan = float("nan")
+        return EnsembleStats(probable=nan, min=nan, max=nan)
     return EnsembleStats(
         probable=float(np.nanmedian(arr)),
         min=float(np.nanmin(arr)),
@@ -19,6 +24,9 @@ def compute_stats(values: list[float]) -> EnsembleStats:
 
 
 def compute_wind_direction_stats(angles_deg: list[float]) -> EnsembleStats:
+    if np.all(np.isnan(angles_deg)):
+        nan = float("nan")
+        return EnsembleStats(probable=nan, min=nan, max=nan)
     rad = np.deg2rad(angles_deg)
     probable = float(
         np.rad2deg(np.arctan2(np.nanmedian(np.sin(rad)), np.nanmedian(np.cos(rad)))) % 360

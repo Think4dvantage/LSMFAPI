@@ -471,14 +471,20 @@ def _build_thermal_grid_cache(
             logger.warning("ThermalGrid parse %s h=%d: %s", var, h, exc)
             return None
 
+    # All-NaN columns are expected here (e.g. CIN's ICON fill value clipped to NaN for every
+    # member at a point) — errstate suppresses the resulting RuntimeWarning noise without
+    # masking genuine warnings elsewhere, matching _interp_to_heights's existing pattern.
     def _median(arr: np.ndarray) -> np.ndarray:
-        return np.nanmedian(arr, axis=0).astype(np.float16)
+        with np.errstate(invalid="ignore"):
+            return np.nanmedian(arr, axis=0).astype(np.float16)
 
     def _nanmin(arr: np.ndarray) -> np.ndarray:
-        return np.nanmin(arr, axis=0).astype(np.float16)
+        with np.errstate(invalid="ignore"):
+            return np.nanmin(arr, axis=0).astype(np.float16)
 
     def _nanmax(arr: np.ndarray) -> np.ndarray:
-        return np.nanmax(arr, axis=0).astype(np.float16)
+        with np.errstate(invalid="ignore"):
+            return np.nanmax(arr, axis=0).astype(np.float16)
 
     # Load prior accumulated values for deaccumulation baseline
     prev_aswdir: np.ndarray | None = None
@@ -632,17 +638,21 @@ def _build_grid_wind_cache(
             # Interpolate every member onto the MAMSL bands, then reduce across members.
             u_alt = _interp_to_heights(u_grid, level_heights, targets_m)   # (M, T, n_grid)
             v_alt = _interp_to_heights(v_grid, level_heights, targets_m)
-            for ai, alt_m in enumerate(alt_m_order):
-                u = u_alt[:, ai, :].astype(np.float64)
-                v = v_alt[:, ai, :].astype(np.float64)
-                speeds = np.sqrt(u ** 2 + v ** 2) * 3.6
-                dirs = (270.0 - np.degrees(np.arctan2(v, u))) % 360.0
-                rad = np.deg2rad(dirs)
-                ws_cache[alt_m][h_idx] = np.nanmedian(speeds, axis=0).astype(np.float16)
-                wd_cache[alt_m][h_idx] = (np.degrees(np.arctan2(
-                    np.nanmedian(np.sin(rad), axis=0),
-                    np.nanmedian(np.cos(rad), axis=0),
-                )) % 360.0).astype(np.float16)
+            # Grid points below terrain at this band are legitimately all-NaN across every
+            # member (see _interp_to_heights) — errstate suppresses the expected
+            # RuntimeWarning without masking genuine warnings elsewhere.
+            with np.errstate(invalid="ignore"):
+                for ai, alt_m in enumerate(alt_m_order):
+                    u = u_alt[:, ai, :].astype(np.float64)
+                    v = v_alt[:, ai, :].astype(np.float64)
+                    speeds = np.sqrt(u ** 2 + v ** 2) * 3.6
+                    dirs = (270.0 - np.degrees(np.arctan2(v, u))) % 360.0
+                    rad = np.deg2rad(dirs)
+                    ws_cache[alt_m][h_idx] = np.nanmedian(speeds, axis=0).astype(np.float16)
+                    wd_cache[alt_m][h_idx] = (np.degrees(np.arctan2(
+                        np.nanmedian(np.sin(rad), axis=0),
+                        np.nanmedian(np.cos(rad), axis=0),
+                    )) % 360.0).astype(np.float16)
 
         t_dest  = tmpdir / f"T_2M_{h:03d}.grib2"
         td_dest = tmpdir / f"TD_2M_{h:03d}.grib2"
@@ -667,7 +677,8 @@ def _build_grid_wind_cache(
             rh_members = _compute_rh_from_td(
                 t_arr.astype(np.float64), td_arr.astype(np.float64),
             )
-            rh_cache[h_idx] = np.nanmedian(rh_members, axis=0).astype(np.float16)
+            with np.errstate(invalid="ignore"):
+                rh_cache[h_idx] = np.nanmedian(rh_members, axis=0).astype(np.float16)
 
         logger.debug("Grid %s h=%d computed", model, h)
 

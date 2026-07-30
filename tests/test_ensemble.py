@@ -1,6 +1,7 @@
 """Unit tests for services/ensemble.py — pure numpy, no network, no eccodes."""
 
 import math
+import warnings
 
 from lsmfapi.services.ensemble import compute_stats, compute_wind_direction_stats
 
@@ -41,3 +42,22 @@ def test_compute_wind_direction_stats_nan_safe():
     assert not math.isnan(stats["min"])
     assert not math.isnan(stats["max"])
     assert not math.isnan(stats["probable"])
+
+
+def test_compute_stats_all_nan_returns_nan_without_warning():
+    """An all-NaN ensemble (every member failed) is expected, not a bug — must not warn."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        stats = compute_stats([float("nan"), float("nan")])
+    assert math.isnan(stats["probable"])
+    assert math.isnan(stats["min"])
+    assert math.isnan(stats["max"])
+
+
+def test_compute_wind_direction_stats_all_nan_returns_nan_without_warning():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        stats = compute_wind_direction_stats([float("nan"), float("nan")])
+    assert math.isnan(stats["probable"])
+    assert math.isnan(stats["min"])
+    assert math.isnan(stats["max"])

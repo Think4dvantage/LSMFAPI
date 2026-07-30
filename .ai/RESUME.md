@@ -404,6 +404,28 @@ imports and uses `PRESSURE_VARS`).
 findings (remaining 4 all in `scripts/diag_interlaken.py`, which P3-6 deletes next); local
 pure-Python tests (`test_ensemble.py`, `test_cache_persistence.py`) still pass unaffected.
 
+### v0.3.24 — P2-8 all-NaN reduction warnings fixed
+
+**Finding**: `np.nanmin`/`nanmax`/`nanmedian` on an all-NaN slice warn — `services/ensemble.py`
+and two spots in `icon_ch1_eps.py`'s grid-cache builders were unguarded, unlike
+`_interp_to_heights` which already uses `np.errstate`. Post-v0.3.6 an all-NaN slice is expected
+(a band below terrain, or every ensemble member failing a step), so this was pure noise
+masking real warnings — CI reported "10 warnings".
+
+**Fix**: `compute_stats`/`compute_wind_direction_stats` now check `np.all(np.isnan(...))` first
+and skip the reducers entirely rather than call something guaranteed to warn — return value is
+unchanged (still NaN in, NaN out; the existing Pydantic `nan_to_none` validator already turns
+that into `null` at the API boundary, so no caller-visible change). Verified locally with a new
+test that wraps `warnings.simplefilter("error")` around the call — proves the warning no longer
+fires, not just that the code "looks" guarded. `icon_ch1_eps.py`'s three grid-level reduction
+sites (thermal grid's `_median`/`_nanmin`/`_nanmax` helpers, and the wind-grid's per-altitude
+`ws_cache`/`wd_cache` loop and `rh_cache` line) now wrap in `np.errstate(invalid="ignore")`,
+same pattern as `_interp_to_heights`. No `warnings.filterwarnings` blanket suppression anywhere.
+
+**Verify** (CI): the `10 warnings` line in the integration test's pytest summary should drop
+to whatever's left after this and P2-9 (already applied) — any remaining warning is now
+something to actually look at.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
