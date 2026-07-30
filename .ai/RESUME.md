@@ -133,6 +133,25 @@ this ever reached the logs either.
 rising count instead of filling the panel; deliberately triggering a 500 shows up in the panel
 **and** as an ERROR log line.
 
+### v0.3.13 — P1-9 unhandled exceptions now get caught, logged, and recorded
+
+**Finding**: `TelemetryMiddleware`'s `response = await call_next(request)` only records errors
+for responses that complete normally through the app. An unhandled exception (no handler was
+registered for the bare `Exception` type) propagates straight out of `call_next()` before that
+code runs — the class of error that matters most was invisible to both the dashboard and, per
+P1-2's log-level fix, effectively invisible everywhere.
+
+**Fix**: `@app.exception_handler(Exception)` — logs at ERROR with `exc_info=True`, returns the
+documented `{"error": {code, message}}` envelope with a generic message (no exception text in
+the response body, consistent with the P0-1 fix). Since Starlette's `ExceptionMiddleware` sits
+*inside* user middleware, once this handler converts the exception into a real `Response`,
+`TelemetryMiddleware` sees it like any other ≥400 response and records/logs it automatically —
+no separate telemetry call needed in the handler itself.
+
+**Verify** (pending PRD deploy): trigger a genuine unhandled exception and confirm it now
+appears in `/api/dashboard`'s error panel and as an ERROR-level log line, where previously it
+appeared as neither.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

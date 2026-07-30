@@ -67,6 +67,17 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
         return response
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Never put exception text in the response body — log it, return a generic message.
+    # TelemetryMiddleware records this like any other >=400 response once it's a real Response.
+    logger.error("Unhandled exception on %s %s", request.method, request.url.path, exc_info=True)
+    return JSONResponse(
+        {"error": {"code": "internal_error", "message": "Internal server error"}},
+        status_code=500,
+    )
+
+
 app.add_middleware(TelemetryMiddleware)
 app.include_router(forecast.router)
 app.include_router(dashboard.router)
