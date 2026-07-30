@@ -338,6 +338,33 @@ integration test, never as an automatic PR.
 **Verify**: next scheduled dependabot run opens at most one grouped `pip` PR and one grouped
 `github-actions` PR, with no PR touching the eccodes triplet.
 
+### v0.3.21 — P3-4 CI actions bumped, cached, concurrency-guarded, arm64 dropped
+
+**Finding**: `actions/checkout@v4` and `setup-python@v5` run on the deprecated Node 20 runtime
+(a hard break once GitHub removes it); no dependency caching anywhere, so every run
+re-downloaded numpy/scipy/eccodeslib wheels; no `concurrency` group, so two pushes to `main`
+could run two 172 MB integration tests in parallel against the live MeteoSwiss API;
+`docker-publish.yml` built `linux/amd64,linux/arm64` under QEMU emulation with no evidence
+arm64 is deployed anywhere.
+
+**Fix** (both `integration-test.yml` and `docker-publish.yml`):
+- `actions/checkout@v4` → `@v5`, `actions/setup-python@v5` → `@v6`.
+- `pipx install poetry` moved before `setup-python`, which now sets `cache: "poetry"` — this
+  ordering matters: `setup-python`'s Poetry cache integration shells out to `poetry config` to
+  locate the cache path, so Poetry must already be on PATH when that step runs.
+- `concurrency: {group: "${{ github.workflow }}-${{ github.ref }}", cancel-in-progress: true}`
+  added at the workflow level in both files.
+- **User confirmed**: dropped `linux/arm64` from `docker-publish.yml`'s build matrix — amd64
+  only now. Removed the now-unneeded `docker/setup-qemu-action` step entirely.
+- Left alone (hedged in the plan, not a firm ask): the integration test's
+  `len({round(s,1) for s in speeds}) >= 2` distinctness assertion, which technically assumes
+  real vertical wind shear at Interlaken rather than being a pure code invariant — changing a
+  load-bearing regression assertion carries its own risk that outweighs the modest benefit here.
+
+**Verify**: next CI run shows the Poetry cache being restored (`Cache restored from key: ...`)
+and completes faster; a second push while one run is in flight cancels the superseded run;
+the published image manifest lists only `linux/amd64`.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
