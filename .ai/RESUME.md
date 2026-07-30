@@ -365,6 +365,14 @@ arm64 is deployed anywhere.
 and completes faster; a second push while one run is in flight cancels the superseded run;
 the published image manifest lists only `linux/amd64`.
 
+### v0.3.22 — P2-3 orphaned temp cache files now self-heal
+
+PRD had a 161 MB `grid_cache_ch1.tmp.npz` orphaned since Jul 16 — `_remove_legacy_grid_files()`
+only knew specific legacy filenames, not the `.tmp` pattern a partial write leaves behind.
+`load_cache()` now also globs `*.tmp.npz`/`*.tmp` in the data dir and unlinks whatever it
+finds (INFO log per file) — a temp file present at boot is by definition an interrupted write.
+Deleting the existing PRD file is the user's call, not done here.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

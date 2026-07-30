@@ -401,6 +401,7 @@ def load_cache() -> None:
     _load_grid_cache()
     _load_thermal_grid_cache()
     _remove_legacy_grid_files()
+    _remove_orphaned_tmp_files()
 
 
 def _load_valid_times(vt_arr: np.ndarray) -> list:
@@ -489,6 +490,21 @@ def _remove_legacy_grid_files() -> None:
                 logger.info("Removed legacy grid cache file %s", path)
         except Exception:
             logger.warning("Could not remove legacy grid cache file %s", path, exc_info=True)
+
+
+def _remove_orphaned_tmp_files() -> None:
+    """A *.tmp/*.tmp.npz present at startup is by definition an interrupted write —
+    the atomic tmp->rename pattern never leaves one behind on a clean save."""
+    data_dir = CACHE_FILE.parent
+    if not data_dir.exists():
+        return
+    for pattern in ("*.tmp.npz", "*.tmp"):
+        for path in data_dir.glob(pattern):
+            try:
+                path.unlink()
+                logger.info("Removed orphaned temp cache file %s", path)
+            except Exception:
+                logger.warning("Could not remove orphaned temp cache file %s", path, exc_info=True)
 
 
 def cache_stats() -> dict:
