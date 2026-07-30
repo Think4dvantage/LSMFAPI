@@ -847,6 +847,52 @@ specifically for anything involving CH2's shadow h33 fetch or CH1's altitude-win
 assertion, since those exercise the two branches that most changed shape (even though the
 underlying logic is unchanged).
 
+### v0.3.38 — P3-8 collector efficiency wins (partial), applied post-P3-5 as the plan required
+
+The plan explicitly said "batch these only after P3-5, or they will need doing twice" — landed
+now, once, against the new shared `_icon_eps_base.py` rather than duplicated across two files.
+
+**Shipped** (all low-risk, mechanical, verified with `py_compile`/`ruff`/the local pure-Python
+test suite):
+- `services/ensemble.py`'s `compute_stats`/`compute_wind_direction_stats` now take
+  `np.ndarray | list[float]` and use `np.asarray` instead of forcing a list round trip —
+  `_to_ensemble_value`/`_wind_ensemble_value` now pass arrays straight through instead of
+  `.tolist()`ing them first. At ~296k calls per CH2 run this was pure waste.
+- `_nan_surf` (the all-NaN fallback for a failed surface fetch) is now `dtype=np.float32`,
+  matching what eccodes actually returns. It was float64, and mixing one float64 array into
+  `np.stack`'s list of otherwise-float32 arrays silently upcasts the *entire* stacked result —
+  so all 17 surface variables were carrying 2x their needed memory.
+- `_interp_to_heights`'s `level_heights.astype(np.float32)` cast is hoisted to each call site:
+  the station path calls it 3x per `collect()` (U/V/W) with the identical array, now cast
+  once before those calls; the grid-build path calls it 2x per horizon (U/V), now cast once
+  before the horizon loop. `_interp_to_heights` itself skips the cast when already float32
+  (same pattern already used for its `field` parameter).
+- `surf_tasks`/`pres_tasks` are `.clear()`'d right after their last real read (all 7
+  station-relevant `surf_array()` + 3 `pres_array()` calls); `u_pl`/`v_pl`/`w_pl` are `del`'d
+  right after they're consumed into `u_alt`/`v_alt`/`w_alt` — grepped every reference first to
+  confirm both are genuinely dead past that point before removing them.
+
+**Deferred, both requiring real restructuring rather than a mechanical tweak**:
+- **Dropping `forecast:horizon` from the STAC search payload** (34–87× fewer searches per the
+  plan's estimate) — the current architecture does one `_search_item_url` call per
+  `(variable, horizon)` pair; dropping the horizon filter would return *every* horizon's asset
+  in one response per variable, requiring the caller to select the right feature by horizon
+  from the result set instead of relying on the query to do it. That's a real change to the
+  fetch/schedule shape (one search per variable, not per variable×horizon), not a one-line
+  tweak, and changes live network-call semantics against the real STAC API in a way I can't
+  verify locally at all.
+- **Shrinking `_GRID_LEVEL_HEIGHTS` retention to only sampled+station columns** (~10x
+  overshoot per the plan, since only ~121k grid-sample + ~500 station columns out of the full
+  grid's columns are ever read) — `_ensure_grid()` builds the full-grid height array before
+  station indices are even known (those come later, in `collect()`, via a KD-tree query
+  against the already-fetched station list). Trimming would mean either computing station
+  indices earlier (reordering `_fetch_stations()` ahead of `_ensure_grid()`) or keeping the
+  full array until first use and only then slicing-and-replacing the module singleton —
+  doable, but a real control-flow change, not touched here.
+
+**Verify** (CI): station-cache content unaffected (pure internal-representation change);
+memory profile should show measurably lower peak resident grid arrays for CH2 in particular.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

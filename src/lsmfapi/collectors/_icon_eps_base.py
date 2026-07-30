@@ -158,7 +158,9 @@ def _compute_rh_from_td(t_k: np.ndarray, td_k: np.ndarray) -> np.ndarray:
 
 
 def _to_ensemble_value(arr_1d: np.ndarray) -> EnsembleValue:
-    stats = compute_stats(arr_1d.tolist())
+    # Pass the ndarray straight through — compute_stats takes ndarray or list now, so this
+    # skips a numpy->list->numpy round trip on every one of ~296k calls per CH2 run.
+    stats = compute_stats(arr_1d)
     return EnsembleValue(**stats)
 
 
@@ -166,8 +168,8 @@ def _wind_ensemble_value(u: np.ndarray, v: np.ndarray) -> tuple[EnsembleValue, E
     speeds = np.sqrt(u ** 2 + v ** 2)
     directions = (270.0 - np.degrees(np.arctan2(v, u))) % 360.0
     return (
-        EnsembleValue(**compute_stats(speeds.tolist())),
-        EnsembleValue(**compute_wind_direction_stats(directions.tolist())),
+        EnsembleValue(**compute_stats(speeds)),
+        EnsembleValue(**compute_wind_direction_stats(directions)),
     )
 
 
@@ -246,7 +248,7 @@ def _interp_to_heights(
         # Level count mismatch (unexpected) — cannot align; return all-NaN rather than guess.
         return np.full((field.shape[0], len(targets_m), field.shape[2]), np.nan, dtype=np.float32)
 
-    z = level_heights.astype(np.float32)
+    z = level_heights if level_heights.dtype == np.float32 else level_heights.astype(np.float32)
     f = field if field.dtype == np.float32 else field.astype(np.float32)
     if z[0, 0] > z[-1, 0]:            # top→bottom → flip to ascending height
         z = z[::-1]
@@ -645,6 +647,10 @@ def _build_grid_wind_cache(
     n_horizons = len(horizons)
     alt_m_order = ALTITUDE_TARGETS_M
     targets_m = np.array(ALTITUDE_TARGETS_M, dtype=np.float64)
+    # float32 up front: _interp_to_heights is called twice per horizon (U, V) below with
+    # this same array — casting once here instead of once per call avoids re-materialising
+    # it 2 x n_horizons times per grid-build run.
+    level_heights = level_heights.astype(np.float32)
 
     # float16 storage — ws (km/h), wd (deg), rh (%) all fit float16 with far finer
     # resolution than the data warrants; halves resident grid memory. Stats are computed
@@ -1024,7 +1030,9 @@ class IconEpsCollectorBase(BaseCollector):
             )
             logger.info("%s ensemble members in GRIB: %d", tag, _n_members)
 
-            _nan_surf = np.full((_n_members, n_stations), np.nan)
+            # float32, matching what eccodes actually returns (see _read_grib2_eccodes) —
+            # float64 here would upcast every one of the 17 stacked surface arrays below.
+            _nan_surf = np.full((_n_members, n_stations), np.nan, dtype=np.float32)
 
             def surf_array(var: str) -> np.ndarray:
                 steps = []
@@ -1066,6 +1074,12 @@ class IconEpsCollectorBase(BaseCollector):
             # W's 3D files (~1.8 GB each) are now deleted per-horizon by _fetch_step's
             # delete_after_read=True as soon as each is downloaded and station-extracted,
             # instead of all horizons worth lingering on disk until this point.
+
+            # Every array these held is now stacked into u_10m/v_10m/.../u_pl/v_pl/w_pl above;
+            # nothing reads the task dicts again, but each Task still pins its own result
+            # array alive until the dict itself is dropped.
+            surf_tasks.clear()
+            pres_tasks.clear()
 
             # NaN, not zero: if the baseline fetch fails, the first delta must surface as
             # missing data, not as the full accumulation misread as a 1-hour rate (P1-11).
@@ -1121,7 +1135,10 @@ class IconEpsCollectorBase(BaseCollector):
             n_alt = len(alt_m_order)
             level_heights = self._grid_level_heights()
             if level_heights is not None and u_pl.shape[2] == level_heights.shape[0]:
-                z_stn = level_heights[:, station_flat_indices]          # (L, S)
+                # float32 up front: _to_alt below calls _interp_to_heights 3x (U/V/W) with
+                # this same array — casting once here instead of once per call inside it
+                # avoids re-materialising ~39 MB 3 times per collect() run.
+                z_stn = level_heights[:, station_flat_indices].astype(np.float32)  # (L, S)
                 _H, _M, _L, _S = u_pl.shape
                 def _to_alt(field: np.ndarray) -> np.ndarray:
                     return _interp_to_heights(
@@ -1141,6 +1158,10 @@ class IconEpsCollectorBase(BaseCollector):
                     "(pres levels=%s, heights=%s) — bands null",
                     tag, u_pl.shape[2], None if level_heights is None else level_heights.shape[0],
                 )
+            # Dead from here on — only u_alt/v_alt/w_alt (the interpolated bands) are used
+            # by the station loop below. Drop the raw per-model-level arrays now rather than
+            # keep them alive through the whole station-building pass.
+            del u_pl, v_pl, w_pl
 
             def _build_and_cache_stations() -> None:
                 """~8.7k StationForecastHour + ~78k AltitudeWindLevel Pydantic objects and
