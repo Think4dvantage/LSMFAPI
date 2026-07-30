@@ -538,6 +538,29 @@ which touches this same Dockerfile next.
 **Verify**: `git status` shows `.claude/settings.local.json` as untracked-but-present; a fresh
 `docker compose up` still gets a working healthcheck from the image alone.
 
+### v0.3.29 — P2-2 Dockerfile pinning + .dockerignore
+
+**Finding**: `FROM python:3.11-slim` floated with no digest — the exact class of drift that
+caused the v0.3.3 PRD crash loop when the tag silently rolled bookworm→trixie (apt libeccodes
+2.28→2.41.0). `pip install poetry` (Dockerfile) and `pipx install poetry` (both CI workflow
+files, 3 sites) were all unversioned — again, literally the drift class that caused v0.3.4.
+No `.dockerignore` — build context shipped `.git/`, `.ai/`, `data/`, etc. on every build.
+
+**Fix**:
+- Fetched the *real* current manifest-list digest for `python:3.11-slim` directly from the
+  Docker Hub registry API (never invented): `sha256:db3ff2e1800a8581e2c48a27c3995339d47bd
+  f046da21c7627accd3d51053a93`. Comment records the pin date so staleness is visible later.
+- Pinned Poetry to `2.2.1` in the `Dockerfile` and all 3 CI call sites
+  (`integration-test.yml`'s `unit`+`e2e` jobs, `docker-publish.yml`'s `test` job) — the same
+  version this session already used locally to safely regenerate `poetry.lock` for P3-2.
+- Added `.dockerignore` (`.git/`, `.github/`, `.ai/`, `.claude/`, `specs/`, `docs/`, `tests/`,
+  `scripts/`, `data/`, `grib-cache/`, `*.md`, `config.yml`, caches). Nothing in it was ever
+  `COPY`'d into the image (no `COPY . .` anywhere), so this is a build-speed fix, not a
+  disclosure fix.
+
+**Verify** (CI): next build shows the pinned digest resolving without a re-pull warning;
+`poetry --version` in the build log reads exactly `2.2.1` everywhere; build context size drops.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
