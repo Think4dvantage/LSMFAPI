@@ -883,7 +883,9 @@ class IconCh1EpsCollector(BaseCollector):
                     return None
 
         try:
-            arr, _level_coords = _read_grib2_eccodes(dest, extract_indices=station_flat_indices)
+            arr, _level_coords = await asyncio.to_thread(
+                _read_grib2_eccodes, dest, extract_indices=station_flat_indices,
+            )
             if arr is None:
                 logger.warning("eccodes returned None for %s h=%d", variable, horizon_h)
                 return None
@@ -1119,86 +1121,95 @@ class IconCh1EpsCollector(BaseCollector):
                     u_pl.shape[2], None if _GRID_LEVEL_HEIGHTS is None else _GRID_LEVEL_HEIGHTS.shape[0],
                 )
 
-            for s_idx, station in enumerate(stations):
-                station_id = station["station_id"]
+            def _build_and_cache_stations() -> None:
+                """~8.7k StationForecastHour + ~78k AltitudeWindLevel Pydantic objects and
+                ~296k compute_stats calls for CH2-sized runs — real CPU time that would
+                otherwise block the event loop for its whole duration. Only the set_*
+                calls touch shared state (same rule as the v0.3.5 grid-build fix); every
+                other local here is built fresh per call.
+                """
+                for s_idx, station in enumerate(stations):
+                    station_id = station["station_id"]
 
-                forecast_list: list[StationForecastHour] = []
-                profiles_list: list[AltitudeWindsProfile] = []
+                    forecast_list: list[StationForecastHour] = []
+                    profiles_list: list[AltitudeWindsProfile] = []
 
-                for h_idx, h in enumerate(HORIZONS):
-                    valid_time = ref_dt + timedelta(hours=h)
+                    for h_idx, h in enumerate(HORIZONS):
+                        valid_time = ref_dt + timedelta(hours=h)
 
-                    def s(arr: np.ndarray) -> EnsembleValue:
-                        return _to_ensemble_value(arr[h_idx, :, s_idx])
+                        def s(arr: np.ndarray) -> EnsembleValue:
+                            return _to_ensemble_value(arr[h_idx, :, s_idx])
 
-                    ws_ev, wd_ev = _wind_ensemble_value(
-                        u_10m[h_idx, :, s_idx], v_10m[h_idx, :, s_idx]
-                    )
-                    wg_ev = s(vmax_10m)
-                    t_ev  = s(t_c)
-                    rh_ev = s(rh)
-                    p_ev  = s(pmsl_hpa)
-                    pr_ev = s(prec_rate)
-
-                    ws_p, ws_mn, ws_mx = _ev_flat(ws_ev, scale=3.6)
-                    wg_p, wg_mn, wg_mx = _ev_flat(wg_ev, scale=3.6)
-                    wd_p, wd_mn, wd_mx = _ev_flat(wd_ev)
-                    t_p,  t_mn,  t_mx  = _ev_flat(t_ev)
-                    rh_p, rh_mn, rh_mx = _ev_flat(rh_ev)
-                    p_p,  p_mn,  p_mx  = _ev_flat(p_ev)
-                    pr_p, pr_mn, pr_mx = _ev_flat(pr_ev)
-
-                    forecast_list.append(StationForecastHour(
-                        valid_time=valid_time,
-                        wind_speed=ws_p, wind_speed_min=ws_mn, wind_speed_max=ws_mx,
-                        wind_gust=wg_p, wind_gust_min=wg_mn, wind_gust_max=wg_mx,
-                        wind_direction=wd_p, wind_direction_min=wd_mn, wind_direction_max=wd_mx,
-                        temperature=t_p, temperature_min=t_mn, temperature_max=t_mx,
-                        humidity=rh_p, humidity_min=rh_mn, humidity_max=rh_mx,
-                        pressure_qff=p_p, pressure_qff_min=p_mn, pressure_qff_max=p_mx,
-                        precipitation=pr_p, precipitation_min=pr_mn, precipitation_max=pr_mx,
-                    ))
-
-                    level_list: list[AltitudeWindLevel] = []
-                    for alt_idx, alt_m in enumerate(alt_m_order):
-                        pl_ws_ev, pl_wd_ev = _wind_ensemble_value(
-                            u_alt[h_idx, :, alt_idx, s_idx], v_alt[h_idx, :, alt_idx, s_idx]
+                        ws_ev, wd_ev = _wind_ensemble_value(
+                            u_10m[h_idx, :, s_idx], v_10m[h_idx, :, s_idx]
                         )
-                        pl_wv_ev = _to_ensemble_value(w_alt[h_idx, :, alt_idx, s_idx])
+                        wg_ev = s(vmax_10m)
+                        t_ev  = s(t_c)
+                        rh_ev = s(rh)
+                        p_ev  = s(pmsl_hpa)
+                        pr_ev = s(prec_rate)
 
-                        pl_ws_p, pl_ws_mn, pl_ws_mx = _ev_flat(pl_ws_ev, scale=3.6)
-                        pl_wd_p, pl_wd_mn, pl_wd_mx = _ev_flat(pl_wd_ev)
-                        pl_wv_p, pl_wv_mn, pl_wv_mx = _ev_flat(pl_wv_ev)
+                        ws_p, ws_mn, ws_mx = _ev_flat(ws_ev, scale=3.6)
+                        wg_p, wg_mn, wg_mx = _ev_flat(wg_ev, scale=3.6)
+                        wd_p, wd_mn, wd_mx = _ev_flat(wd_ev)
+                        t_p,  t_mn,  t_mx  = _ev_flat(t_ev)
+                        rh_p, rh_mn, rh_mx = _ev_flat(rh_ev)
+                        p_p,  p_mn,  p_mx  = _ev_flat(p_ev)
+                        pr_p, pr_mn, pr_mx = _ev_flat(pr_ev)
 
-                        level_list.append(AltitudeWindLevel(
-                            level_m=alt_m,
-                            wind_speed=pl_ws_p, wind_speed_min=pl_ws_mn, wind_speed_max=pl_ws_mx,
-                            wind_direction=pl_wd_p, wind_direction_min=pl_wd_mn, wind_direction_max=pl_wd_mx,
-                            vertical_wind=pl_wv_p, vertical_wind_min=pl_wv_mn, vertical_wind_max=pl_wv_mx,
+                        forecast_list.append(StationForecastHour(
+                            valid_time=valid_time,
+                            wind_speed=ws_p, wind_speed_min=ws_mn, wind_speed_max=ws_mx,
+                            wind_gust=wg_p, wind_gust_min=wg_mn, wind_gust_max=wg_mx,
+                            wind_direction=wd_p, wind_direction_min=wd_mn, wind_direction_max=wd_mx,
+                            temperature=t_p, temperature_min=t_mn, temperature_max=t_mx,
+                            humidity=rh_p, humidity_min=rh_mn, humidity_max=rh_mx,
+                            pressure_qff=p_p, pressure_qff_min=p_mn, pressure_qff_max=p_mx,
+                            precipitation=pr_p, precipitation_min=pr_mn, precipitation_max=pr_mx,
                         ))
-                    profiles_list.append(AltitudeWindsProfile(valid_time=valid_time, levels=level_list))
 
-                set_station_forecast(
-                    station_id,
-                    StationForecastResponse(
-                        station_id=station_id,
-                        init_time=ref_dt,
-                        model="icon-ch1",
-                        source="swissmeteo",
-                        forecast=forecast_list,
-                    ),
-                )
-                set_station_altitude_winds(
-                    station_id,
-                    AltitudeWindsResponse(
-                        station_id=station_id,
-                        init_time=ref_dt,
-                        model="icon-ch1",
-                        source="swissmeteo",
-                        profiles=profiles_list,
-                    ),
-                )
-                logger.info("Cached forecast for %s (%d hours)", station_id, len(forecast_list))
+                        level_list: list[AltitudeWindLevel] = []
+                        for alt_idx, alt_m in enumerate(alt_m_order):
+                            pl_ws_ev, pl_wd_ev = _wind_ensemble_value(
+                                u_alt[h_idx, :, alt_idx, s_idx], v_alt[h_idx, :, alt_idx, s_idx]
+                            )
+                            pl_wv_ev = _to_ensemble_value(w_alt[h_idx, :, alt_idx, s_idx])
+
+                            pl_ws_p, pl_ws_mn, pl_ws_mx = _ev_flat(pl_ws_ev, scale=3.6)
+                            pl_wd_p, pl_wd_mn, pl_wd_mx = _ev_flat(pl_wd_ev)
+                            pl_wv_p, pl_wv_mn, pl_wv_mx = _ev_flat(pl_wv_ev)
+
+                            level_list.append(AltitudeWindLevel(
+                                level_m=alt_m,
+                                wind_speed=pl_ws_p, wind_speed_min=pl_ws_mn, wind_speed_max=pl_ws_mx,
+                                wind_direction=pl_wd_p, wind_direction_min=pl_wd_mn, wind_direction_max=pl_wd_mx,
+                                vertical_wind=pl_wv_p, vertical_wind_min=pl_wv_mn, vertical_wind_max=pl_wv_mx,
+                            ))
+                        profiles_list.append(AltitudeWindsProfile(valid_time=valid_time, levels=level_list))
+
+                    set_station_forecast(
+                        station_id,
+                        StationForecastResponse(
+                            station_id=station_id,
+                            init_time=ref_dt,
+                            model="icon-ch1",
+                            source="swissmeteo",
+                            forecast=forecast_list,
+                        ),
+                    )
+                    set_station_altitude_winds(
+                        station_id,
+                        AltitudeWindsResponse(
+                            station_id=station_id,
+                            init_time=ref_dt,
+                            model="icon-ch1",
+                            source="swissmeteo",
+                            profiles=profiles_list,
+                        ),
+                    )
+                    logger.info("Cached forecast for %s (%d hours)", station_id, len(forecast_list))
+
+            await asyncio.to_thread(_build_and_cache_stations)
 
             # Grid collection reads the U/V GRIBs kept in tmpdir. Off the event loop:
             # it parses hundreds of GRIBs (~8 min for CH1) and would otherwise block

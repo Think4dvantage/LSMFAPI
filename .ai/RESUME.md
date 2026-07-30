@@ -748,6 +748,35 @@ should show a visibly lower peak than before, with `W_*.grib2` files never accum
 handful at a time (bounded by `DOWNLOAD_CONCURRENCY`) regardless of how many horizons have
 been scheduled.
 
+### v0.3.36 — P1-5 remaining blocking calls moved off the event loop
+
+**Finding**: v0.3.5 only moved `collect_grid()` to a thread. Two other CPU-bound spots
+identified at the time were left for later: `_fetch_step`'s `_read_grib2_eccodes` call (once
+per file, 782 CH1 / 2006 CH2 per run, each file a deliberately two-pass full read) runs inside
+`async def _fetch_step` directly; and the per-station stats loop building
+`StationForecastHour`/`AltitudeWindLevel` objects (~8.7k/~78k respectively for CH2, ~296k
+`compute_stats` calls) runs inline inside `async def collect()`.
+
+**Fix**:
+- `arr, _level_coords = await asyncio.to_thread(_read_grib2_eccodes, dest,
+  extract_indices=station_flat_indices)` — one-line change, same as the grid-build precedent.
+- The station loop is now a nested `def _build_and_cache_stations() -> None` (not `async def`)
+  inside `collect()`, capturing the same closure variables (`stations`, `ref_dt`, `HORIZONS`,
+  `u_10m`, `t_c`, `rh`, `u_alt`, etc.) it always had access to, called via
+  `await asyncio.to_thread(_build_and_cache_stations)`. Mechanically this was a re-indent of
+  the existing loop body one level deeper plus wrapping — no logic changed. Same shared-state
+  rule as v0.3.5's grid-build fix: only `set_station_forecast`/`set_station_altitude_winds`
+  touch the shared cache; every `EnsembleValue`/`StationForecastHour`/etc. is a fresh local.
+- Applied identically to both `icon_ch1_eps.py` and `icon_ch2_eps.py`.
+
+**Verify** (CI/PRD): reviewed the full diff by hand for both files after the re-indent
+(indentation-sensitive changes are easy to get subtly wrong) — confirmed
+`set_station_forecast`/`set_station_altitude_winds`/the closing log line sit at the
+per-station level (once per station, after all horizons), not per-horizon. `py_compile` +
+`ruff check .` clean on both. Real proof is CI: station data content should be byte-identical
+to before (pure refactor), and the web UI should stay reachable through the parse-heavy window
+that previously ran inline.
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache
