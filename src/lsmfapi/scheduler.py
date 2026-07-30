@@ -35,7 +35,7 @@ async def _run_ch1eps() -> None:
         try:
             await _ch1_collector.collect()
             cs.mark_done("ch1", time.monotonic() - t0)
-            save_cache()
+            await asyncio.to_thread(save_cache)
         except NotImplementedError as e:
             cs.mark_failed("ch1", str(e))
             logger.warning("CH1-EPS collector not yet implemented: %s", e)
@@ -54,7 +54,7 @@ async def _run_ch2eps() -> None:
         try:
             await _ch2_collector.collect()
             cs.mark_done("ch2", time.monotonic() - t0)
-            save_cache()
+            await asyncio.to_thread(save_cache)
         except NotImplementedError as e:
             cs.mark_failed("ch2", str(e))
             logger.warning("CH2-EPS collector not yet implemented: %s", e)

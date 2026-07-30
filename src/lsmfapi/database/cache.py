@@ -50,6 +50,10 @@ _thermal_grid_cache: ThermalGridCache | None = None
 _grid_wind_model_init: dict[str, datetime] = {}
 _thermal_grid_model_init: dict[str, datetime] = {}
 _last_populated_at: datetime | None = None
+# Set whenever a collector writes a slice; save_cache() clears it after a
+# successful write so an unrelated run's save doesn't rewrite an unchanged grid.
+_grid_wind_dirty: bool = False
+_thermal_grid_dirty: bool = False
 
 
 def _merge_station_forecasts(
@@ -141,7 +145,7 @@ def _reported_init(model_init: dict[str, datetime], fallback: datetime) -> datet
 
 def set_grid_wind_cache(data: GridWindCache) -> None:
     """Write one model's horizon slice into the combined wind-grid store (in place)."""
-    global _grid_wind_cache
+    global _grid_wind_cache, _grid_wind_dirty
     combined = _grid_wind_cache
     if combined is None:
         n = data.rh.shape[1]
@@ -174,6 +178,7 @@ def set_grid_wind_cache(data: GridWindCache) -> None:
         combined.valid_times[h] = vt
         written += 1
     _grid_wind_model_init[data.model] = data.init_time
+    _grid_wind_dirty = True
     logger.info("Wind-grid combined store: wrote %d frames for %s", written, data.model)
 
 
@@ -200,7 +205,7 @@ def get_grid_wind_cache() -> GridWindCache | None:
 
 def set_thermal_grid_cache(data: ThermalGridCache) -> None:
     """Write one model's horizon slice into the combined thermal-grid store (in place)."""
-    global _thermal_grid_cache
+    global _thermal_grid_cache, _thermal_grid_dirty
     combined = _thermal_grid_cache
     if combined is None:
         n = data.solar.shape[1]
@@ -225,6 +230,7 @@ def set_thermal_grid_cache(data: ThermalGridCache) -> None:
         combined.valid_times[h] = vt
         written += 1
     _thermal_grid_model_init[data.model] = data.init_time
+    _thermal_grid_dirty = True
     logger.info("Thermal-grid combined store: wrote %d frames for %s", written, data.model)
 
 
@@ -281,8 +287,13 @@ def save_cache() -> None:
     except Exception:
         logger.exception("Failed to save station/altitude-winds cache")
 
-    _save_grid_cache()
-    _save_thermal_grid_cache()
+    global _grid_wind_dirty, _thermal_grid_dirty
+    if _grid_wind_dirty:
+        _save_grid_cache()
+        _grid_wind_dirty = False
+    if _thermal_grid_dirty:
+        _save_thermal_grid_cache()
+        _thermal_grid_dirty = False
 
 
 def _save_grid_cache() -> None:
@@ -301,7 +312,7 @@ def _save_grid_cache() -> None:
             _init_ts("icon-ch1", _grid_wind_model_init), _init_ts("icon-ch2", _grid_wind_model_init),
         ], dtype=np.float64)
         tmp = GRID_CACHE_FILE.with_suffix(".tmp.npz")
-        np.savez_compressed(
+        np.savez(
             str(tmp),
             _meta=meta,
             _valid_times=_valid_times_to_array(combined.valid_times),
@@ -333,7 +344,7 @@ def _save_thermal_grid_cache() -> None:
         for f in _THERMAL_FIELDS:
             arrays[f] = getattr(combined, f)
         tmp = THERMAL_GRID_CACHE_FILE.with_suffix(".tmp.npz")
-        np.savez_compressed(
+        np.savez(
             str(tmp),
             _meta=meta,
             _valid_times=_valid_times_to_array(combined.valid_times),

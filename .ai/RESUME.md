@@ -43,6 +43,38 @@ on the calls that decide what the service collects. The MeteoSwiss clients were 
 **Verify** (pending deploy): a collection run completes normally and `/api/stations` still
 returns the full station list with verification on.
 
+### v0.3.10 — P0-3 `save_cache()` no longer blocks the event loop
+
+**Finding**: `save_cache()` ran synchronously (no `await`, no thread) from both scheduler jobs
+and lifespan shutdown, serialising 170 MB JSON + two multi-hundred-MB npz files. Measured live
+on PRD: a 43.2 s stall per run (2026-07-30 CH1 run: 2.66 s JSON + 15.69 s wind-grid npz +
+24.78 s thermal-grid npz), with zero requests served in that window — same failure class as
+the v0.3.5 grid-build stall, just in the save path instead.
+
+**Fix**:
+1. `await asyncio.to_thread(save_cache)` at both `scheduler.py` call sites. `api/main.py`'s
+   shutdown call stays synchronous on purpose (comment added) — the loop is closing there, and
+   losing the cache on a fast shutdown is worse than a slow one.
+2. Per-grid dirty flag (`_grid_wind_dirty` / `_thermal_grid_dirty`, set by `set_grid_wind_cache`/
+   `set_thermal_grid_cache`, cleared by `save_cache()` after writing): a save no longer rewrites
+   a grid nothing wrote to since the last save.
+3. Switched `np.savez_compressed` → `np.savez` on both grid files. **Measured locally**
+   (synthetic float16 arrays at the real shape — 17 arrays/121 frames/~122k points for wind,
+   36 arrays for thermal; smooth-not-random so it's not a worst-case) since this dev box can't
+   run the real collector: compressed took 20.0 s / 43.7 s for 402 MB / 852 MB;
+   plain `savez` took 0.46 s / 1.14 s for 480 MB / 1017 MB — **~20–40× faster for ~16% more
+   disk**. The timing ratio lines up closely with PRD's observed 15.69 s / 24.78 s, which is
+   good signal the synthetic benchmark is representative of the *shape* of the tradeoff even
+   though absolute sizes differ from real GRIB-derived data. Chose plain `savez`: the app-data
+   volume (`./data`, not the tight GRIB cache disk from P0-4) has headroom, and burning
+   20–40× the CPU in a worker thread for a 16% size cut is a bad trade even off the loop.
+   **Confirm real PRD file sizes/timings after deploy and revisit if disk pressure shows up
+   on that volume.**
+
+**Verify** (pending PRD deploy): gap between `collect() complete` and `executed successfully`
+shrinks to a few seconds with access-log lines appearing inside it; both npz files still load
+on next restart (`Grid cache loaded` / `Thermal grid cache loaded` at INFO).
+
 ### v0.3.7 — CH2 cron misfire fixed (dashboard showed CH2 stuck stale while CH1 kept updating)
 
 **Trigger**: user reported on `lsmfapi.sdh.lol` (v0.3.6, container up 8 days) that CH2's cache

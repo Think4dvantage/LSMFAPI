@@ -36,6 +36,8 @@ async def lifespan(app: FastAPI):
     yield
     if _scheduler:
         _scheduler.shutdown()
+    # Synchronous and blocking on purpose: the loop is closing here, and losing the
+    # cache on a fast shutdown is worse than a slow one.
     save_cache()
 
 

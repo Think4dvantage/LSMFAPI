@@ -18,6 +18,7 @@
 | v0.3.7 | CH2 cron misfire fixed: `misfire_grace_time=1800` on both scheduler jobs — APScheduler's ~1s default was silently skipping CH2 triggers late by only a few seconds, leaving the cache stuck on a stale run for a full 6h cycle while CH1 kept updating normally |
 | v0.3.8 | Tech-debt remediation P0-1: stored XSS in the operator dashboard fixed — `escapeHtml()` applied to every server-data `innerHTML` interpolation in `dashboard.js`/`data.js`; `station_id` constrained to `[A-Za-z0-9_.-]{1,64}`; 404 no longer echoes raw input; telemetry sanitizes path/detail before storing |
 | v0.3.9 | Tech-debt remediation P0-2: `verify=False` removed from all 4 HTTPS clients (Lenticularis proxy, both collectors' `_fetch_stations`, `diag_interlaken.py`) — confirmed with the user that both hosts present valid public certs, so TLS verification was never actually needed |
+| v0.3.10 | Tech-debt remediation P0-3: `save_cache()` moved off the event loop (`asyncio.to_thread` at both scheduler call sites; shutdown stays sync on purpose); per-grid dirty flag so an unrelated run's save no longer rewrites an unchanged grid; switched `np.savez_compressed` → `np.savez` on both grid npz writes (measured ~20–40× faster for ~16% more disk on synthetic same-shape data — see RESUME) |
 
 ---
 
