@@ -1051,7 +1051,17 @@ class IconEpsCollectorBase(BaseCollector):
                 # interpolation needs no float64 copy of the (H·M × levels × stations) block.
                 if not pres_tasks.get(var):
                     return np.full((len(horizons), _n_members, len(pres_level_nums), n_stations), np.nan, dtype=np.float32)
-                nan_pres = np.full((_n_members, len(pres_level_nums), n_stations), np.nan, dtype=np.float32)
+                # Level count is a property of the variable, not shared across U/V/W: W is
+                # reported on generalVertical half-levels (81 for CH1/CH2), one more than
+                # U/V's generalVerticalLayer full levels (80, from the U probe /
+                # pres_level_nums). Sizing every pressure var's NaN template off the U probe
+                # silently discarded every W array as a "shape mismatch" here. Never
+                # hardcode it — read it from the data, same rule as _n_members above.
+                n_levels = next(
+                    (t.result().shape[1] for t in pres_tasks[var] if _task_ok(t) and t.result().ndim == 3),
+                    len(pres_level_nums),
+                )
+                nan_pres = np.full((_n_members, n_levels, n_stations), np.nan, dtype=np.float32)
                 steps = []
                 for task in pres_tasks[var]:
                     r = task.result() if not task.cancelled() else None
@@ -1146,7 +1156,19 @@ class IconEpsCollectorBase(BaseCollector):
                     ).reshape(_H, _M, n_alt, _S)
                 u_alt = _to_alt(u_pl)
                 v_alt = _to_alt(v_pl)
-                w_alt = _to_alt(w_pl)
+                # W is reported on generalVertical half-levels — one more than U/V's
+                # generalVerticalLayer full levels, the same convention as HHL itself.
+                # Average adjacent half-levels down to full levels first (identical
+                # technique to _load_level_heights turning HHL into z_stn) so W aligns
+                # with z_stn/u_pl/v_pl; any other level count is an unexpected mismatch.
+                if w_pl.shape[2] == _L + 1:
+                    w_pl_full = 0.5 * (w_pl[:, :, :-1, :] + w_pl[:, :, 1:, :])
+                elif w_pl.shape[2] == _L:
+                    w_pl_full = w_pl
+                else:
+                    w_pl_full = np.full((_H, _M, _L, _S), np.nan, dtype=np.float32)
+                w_alt = _to_alt(w_pl_full)
+                del w_pl_full
                 logger.info("%s altitude winds: interpolated U/V/W to %d MAMSL bands", tag, n_alt)
             else:
                 _shp = (len(horizons), _n_members, n_alt, n_stations)

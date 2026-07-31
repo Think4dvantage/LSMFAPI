@@ -118,3 +118,13 @@ async def test_ch1_collects_interlaken(monkeypatch):
         "altitude winds identical across bands — levels collapsed onto one "
         "(regression of the generalVerticalLayer index bug)"
     )
+
+    # W is reported on generalVertical half-levels (81), one more than U/V's
+    # generalVerticalLayer full levels (80) — sizing W's NaN template off the U probe's
+    # level count silently discarded every W array as a shape mismatch, so vertical_wind
+    # was null in every response regardless of station or hour.
+    vwinds = [lvl.vertical_wind for lvl in levels0 if lvl.vertical_wind is not None]
+    assert len(vwinds) >= 1, (
+        "vertical_wind all null — W half-level→full-level averaging or its NaN-template "
+        "sizing regressed"
+    )

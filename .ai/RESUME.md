@@ -1,3 +1,61 @@
+# Resume Notes — 2026-07-31
+
+## What Was Done This Session
+
+### v0.3.41 — `vertical_wind` always null, root-caused and fixed
+
+**Trigger**: user reported CH1 altitude-winds nulls (partly a prior session's unconfirmed
+"h8–h33 all-null" note). Investigated live on PRD (`ssh sdh`, `docker exec lsmfapi ...` against
+the running v0.3.39 container) rather than guessing from code alone.
+
+**Finding 1 (real bug, this fix)**: queried `/api/forecast/altitude-winds` for `meteoswiss-INT`
+directly — `wind_speed`/`wind_direction` populate correctly, but `vertical_wind` was **null in
+all 115/115 profiles checked**, at every level, including levels where wind_speed had real data.
+Downloaded a live CH1 `W` GRIB2 file from PRD (via the collector's own `_search_item_url` +
+`download`, ~1.8 GB, then inspected with eccodes directly) and confirmed: **W is
+`typeOfLevel='generalVertical'`, 81 levels** (half-levels/interfaces — same convention as the
+`HHL` height file), while **U/V are `typeOfLevel='generalVerticalLayer'`, 80 levels** (full
+levels). `pres_array()` (`_icon_eps_base.py`, was ~line 1049) sized every pressure variable's
+NaN-template off `pres_level_nums` — derived solely from the U probe (80) — so W's real
+`(members, 81, stations)` array never matched the 80-level template's shape and was silently
+replaced by all-NaN, with no warning logged. Doubly hidden: the one-time vertical-structure
+diagnostic (`_VLEVEL_DIAG_SEEN`, keyed only by `typeOfLevel` string) had already logged
+`generalVertical` once for the unrelated `HHL` file, so W's own read — same type string,
+different level count — never re-triggered the log.
+
+**Fix**:
+- `pres_array(var)` now derives its NaN-template level count from the first successfully-shaped
+  task result *for that variable*, not from the U-derived `pres_level_nums` — same
+  never-hardcode-it-read-it-from-the-data rule this file already uses for `_n_members`.
+- W (now correctly shaped, 81 half-levels) is averaged down to 80 full levels
+  (`w_pl_full = 0.5*(w_pl[:,:,:-1,:] + w_pl[:,:,1:,:])`) right before interpolation — the same
+  technique `_load_level_heights` already uses to turn `HHL`'s 81 half-levels into 80 full-level
+  heights — so it aligns with `z_stn`/U/V's level axis. Any other level count falls back to
+  all-NaN rather than guessing.
+- Shared by both collectors (`collect()` lives in `_icon_eps_base.py`, CH2 inherits it).
+
+**Verified locally** (pure numpy, no eccodes needed — same constraint as ever on this Windows
+box): synthetic half-level averaging shape/identity checks and the n_levels-detection logic both
+pass. **Not yet verified against real GRIB data** — that requires CI/PRD per
+[[env-no-local-linux]]. Extended `tests/test_e2e_collection.py`'s existing altitude-winds
+regression assertion (originally added for the v0.3.6 HHL fix) to also assert `vertical_wind` is
+non-null in at least one level, guarding this exact regression.
+
+**Finding 2 (not a bug, explained)**: the same investigation also found a 5-hour all-null block
+(18:00Z–22:00Z, h12–h16) in that day's CH1 run for Interlaken, across *every* altitude band —
+this is what the "h8–h33" note was pointing at. Root cause: `U` eccodes read failures at h=12–16
+(`"End of resource reached when reading message"`, 2026-07-31 10:47:06–10:48:08) — a truncated/
+corrupted download, not a code defect. The corrupt file self-deletes (existing pattern, see the
+v0.3.34 entry below) and should redownload cleanly on the next scheduled CH1 run (02/08/14/20Z).
+No fix needed; flagged here only so a future session doesn't re-investigate the same non-bug.
+
+**Verify** (pending push/CI/PRD deploy): CI's integration test should now show `vertical_wind`
+populated (not just `wind_speed`) in the altitude-winds assertion; after PRD deploy, re-query
+`/api/forecast/altitude-winds` for a real station and confirm `vertical_wind` is non-null at
+levels above terrain.
+
+---
+
 # Resume Notes — 2026-07-30
 
 ## What Was Done This Session
