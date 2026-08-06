@@ -132,6 +132,15 @@ contiguous block with no gaps) rather than the per-station forecast list this fi
 Applying the same previous-run backfill there would need a different implementation, not a
 shared helper — left as a follow-up rather than guessed at.
 
+**Shipped**: committed (`df546c9` the fix, `4d37834` the docs sync via `.ai/prompts/sync.md` —
+architecture.md/features.md/README.md updated for v0.3.41+v0.3.42, `features.md`'s
+"Current Version" header corrected from a stale v0.3.7), tagged `v0.3.42`, pushed to
+`origin/main`. **Not yet verified**: `gh run list` showed no new workflow run for either the
+`main` push or the `v0.3.42` tag push shortly after pushing — user confirmed GitHub Actions was
+having a platform-wide outage at that moment, not a problem on our end. **Next session: check
+`gh run list` / `gh run list --workflow=docker-publish.yml`** for a run against `v0.3.42` before
+treating this as verified-in-CI, and only then consider it safe to have PRD pull the new image.
+
 ---
 
 **Original bug report** (as received, before investigation):
