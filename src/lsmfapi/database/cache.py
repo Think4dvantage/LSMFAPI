@@ -6,8 +6,11 @@ from pathlib import Path
 import numpy as np
 
 from lsmfapi.models.forecast import (
+    AltitudeWindLevel,
+    AltitudeWindsProfile,
     AltitudeWindsResponse,
     GridWindCache,
+    StationForecastHour,
     StationForecastResponse,
     ThermalGridCache,
 )
@@ -41,6 +44,14 @@ _ch1_station_cache: dict[str, StationForecastResponse] = {}
 _ch2_station_cache: dict[str, StationForecastResponse] = {}
 _ch1_altitude_winds_cache: dict[str, AltitudeWindsResponse] = {}
 _ch2_altitude_winds_cache: dict[str, AltitudeWindsResponse] = {}
+# The run each of the above superseded — CH1's own per-horizon fetches can fail for a
+# subset of hours (a late horizon not yet published, a transient download error) while
+# still producing a StationForecastHour/AltitudeWindLevel for every hour in HORIZONS, so
+# a failure looks identical to "no data" downstream. CH2 can't backfill those hours (it
+# only covers h34+), so the previous CH1 run — kept only in memory, not persisted — is
+# the one source that can for the same absolute valid_time.
+_ch1_station_cache_prev: dict[str, StationForecastResponse] = {}
+_ch1_altitude_winds_cache_prev: dict[str, AltitudeWindsResponse] = {}
 
 # One combined store per grid, sized to the full 121-frame axis. Each collector writes
 # its horizon slice in place (set_*); reads return a contiguous view (get_*, no copy).
@@ -62,7 +73,8 @@ def _merge_station_forecasts(
     """Append CH2 steps that fall strictly after the last CH1 valid_time."""
     cutoff = max(h.valid_time for h in ch1.forecast) if ch1.forecast else None
     tail = [h for h in ch2.forecast if cutoff is None or h.valid_time > cutoff]
-    return ch1.model_copy(update={"forecast": ch1.forecast + tail})
+    model = "icon-ch1+ch2" if tail else ch1.model
+    return ch1.model_copy(update={"forecast": ch1.forecast + tail, "model": model})
 
 
 def _merge_altitude_winds(
@@ -71,12 +83,49 @@ def _merge_altitude_winds(
     """Append CH2 profiles that fall strictly after the last CH1 valid_time."""
     cutoff = max(p.valid_time for p in ch1.profiles) if ch1.profiles else None
     tail = [p for p in ch2.profiles if cutoff is None or p.valid_time > cutoff]
-    return ch1.model_copy(update={"profiles": ch1.profiles + tail})
+    model = "icon-ch1+ch2" if tail else ch1.model
+    return ch1.model_copy(update={"profiles": ch1.profiles + tail, "model": model})
+
+
+def _fill_station_hour(
+    hour: StationForecastHour, prev_by_time: dict[datetime, StationForecastHour]
+) -> StationForecastHour:
+    prev_hour = prev_by_time.get(hour.valid_time)
+    if prev_hour is None:
+        return hour
+    updates = {
+        f: getattr(prev_hour, f)
+        for f in StationForecastHour.model_fields
+        if f != "valid_time" and getattr(hour, f) is None and getattr(prev_hour, f) is not None
+    }
+    return hour.model_copy(update=updates) if updates else hour
+
+
+def _fill_station_forecast_nulls(
+    current: StationForecastResponse, previous: StationForecastResponse | None
+) -> StationForecastResponse:
+    """Backfill null CH1 hours (a failed per-horizon fetch) from the previous CH1 run's
+    entry for the same valid_time, rather than let a hardcoded horizon seam emit a null
+    where slightly-older-but-real data exists."""
+    if previous is None or not any(h.wind_speed is None for h in current.forecast):
+        return current
+    prev_by_time = {h.valid_time: h for h in previous.forecast}
+    filled = [_fill_station_hour(h, prev_by_time) for h in current.forecast]
+    n_filled = sum(1 for new, old in zip(filled, current.forecast) if new is not old)
+    if n_filled:
+        logger.info(
+            "station %s: backfilled %d/%d null hour(s) from previous CH1 run",
+            current.station_id, n_filled, len(filled),
+        )
+        return current.model_copy(update={"forecast": filled})
+    return current
 
 
 def get_station_forecast(station_key: str) -> StationForecastResponse | None:
     ch1 = _ch1_station_cache.get(station_key)
     ch2 = _ch2_station_cache.get(station_key)
+    if ch1 is not None:
+        ch1 = _fill_station_forecast_nulls(ch1, _ch1_station_cache_prev.get(station_key))
     if ch1 is not None and ch2 is not None:
         return _merge_station_forecasts(ch1, ch2)
     return ch1 or ch2
@@ -85,6 +134,9 @@ def get_station_forecast(station_key: str) -> StationForecastResponse | None:
 def set_station_forecast(station_key: str, data: StationForecastResponse) -> None:
     global _last_populated_at
     if data.model == "icon-ch1":
+        prev = _ch1_station_cache.get(station_key)
+        if prev is not None:
+            _ch1_station_cache_prev[station_key] = prev
         _ch1_station_cache[station_key] = data
     else:
         _ch2_station_cache[station_key] = data
@@ -99,9 +151,59 @@ def cache_is_warm() -> bool:
     return bool(_ch1_station_cache or _ch2_station_cache)
 
 
+def _fill_altitude_level(
+    level: AltitudeWindLevel, prev_by_level: dict[int, AltitudeWindLevel]
+) -> AltitudeWindLevel:
+    prev_level = prev_by_level.get(level.level_m)
+    if prev_level is None:
+        return level
+    updates = {
+        f: getattr(prev_level, f)
+        for f in AltitudeWindLevel.model_fields
+        if f != "level_m" and getattr(level, f) is None and getattr(prev_level, f) is not None
+    }
+    return level.model_copy(update=updates) if updates else level
+
+
+def _fill_altitude_profile(
+    profile: AltitudeWindsProfile, prev_by_time: dict[datetime, AltitudeWindsProfile]
+) -> AltitudeWindsProfile:
+    prev_profile = prev_by_time.get(profile.valid_time)
+    if prev_profile is None:
+        return profile
+    prev_by_level = {lvl.level_m: lvl for lvl in prev_profile.levels}
+    filled_levels = [_fill_altitude_level(lvl, prev_by_level) for lvl in profile.levels]
+    if all(new is old for new, old in zip(filled_levels, profile.levels)):
+        return profile
+    return profile.model_copy(update={"levels": filled_levels})
+
+
+def _fill_altitude_winds_nulls(
+    current: AltitudeWindsResponse, previous: AltitudeWindsResponse | None
+) -> AltitudeWindsResponse:
+    """Same backfill as `_fill_station_forecast_nulls`, one level down (per level_m
+    within each profile) since a failed per-horizon fetch nulls a whole profile."""
+    if previous is None or not any(
+        lvl.wind_speed is None for p in current.profiles for lvl in p.levels
+    ):
+        return current
+    prev_by_time = {p.valid_time: p for p in previous.profiles}
+    filled = [_fill_altitude_profile(p, prev_by_time) for p in current.profiles]
+    n_filled = sum(1 for new, old in zip(filled, current.profiles) if new is not old)
+    if n_filled:
+        logger.info(
+            "altitude-winds %s: backfilled %d/%d null profile(s) from previous CH1 run",
+            current.station_id, n_filled, len(filled),
+        )
+        return current.model_copy(update={"profiles": filled})
+    return current
+
+
 def get_station_altitude_winds(station_key: str) -> AltitudeWindsResponse | None:
     ch1 = _ch1_altitude_winds_cache.get(station_key)
     ch2 = _ch2_altitude_winds_cache.get(station_key)
+    if ch1 is not None:
+        ch1 = _fill_altitude_winds_nulls(ch1, _ch1_altitude_winds_cache_prev.get(station_key))
     if ch1 is not None and ch2 is not None:
         return _merge_altitude_winds(ch1, ch2)
     return ch1 or ch2
@@ -109,6 +211,9 @@ def get_station_altitude_winds(station_key: str) -> AltitudeWindsResponse | None
 
 def set_station_altitude_winds(station_key: str, data: AltitudeWindsResponse) -> None:
     if data.model == "icon-ch1":
+        prev = _ch1_altitude_winds_cache.get(station_key)
+        if prev is not None:
+            _ch1_altitude_winds_cache_prev[station_key] = prev
         _ch1_altitude_winds_cache[station_key] = data
     else:
         _ch2_altitude_winds_cache[station_key] = data

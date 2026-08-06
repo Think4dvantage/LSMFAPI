@@ -71,14 +71,19 @@ class CollectorScheduler:
 
     async def startup(self) -> None:
         log_startup_status(get_config().grib_cache_dir)
-        # CH1 (0–33 h, 1 km): trigger at 02/08/14/20 UTC — 2 h after each 00/06/12/18Z run
+        # CH1 (0–33 h, 1 km): trigger at 01:30/07:30/13:30/19:30 UTC — 1.5 h after each
+        # 00/06/12/18Z run (matches REF_DT_GUARD_HOURS in icon_ch1_eps.py). Moved 30 min
+        # earlier than the original 2 h guard on 2026-08-06: collect()'s _wait_for_full_publish
+        # poll now confirms the run is actually fully published before fetching, so starting
+        # the check earlier costs nothing when a run publishes fast (poll succeeds immediately)
+        # and only shortens how far ahead of "ready" we start looking on a slow run.
         # misfire_grace_time: APScheduler's default (1s) skips the whole 6h cycle if the
         # executor is even a few seconds late (observed on PRD for CH2 — see RESUME.md).
         # ref_dt is computed from wall-clock at call time, so running late never fetches
         # the wrong or stale data — it just needs to be allowed to run at all.
         self._scheduler.add_job(
             _run_ch1eps,
-            CronTrigger(hour="2,8,14,20", minute=0, timezone="UTC"),
+            CronTrigger(hour="1,7,13,19", minute=30, timezone="UTC"),
             id="collect_ch1eps",
             misfire_grace_time=1800,
         )

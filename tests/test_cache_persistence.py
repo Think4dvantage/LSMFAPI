@@ -8,7 +8,15 @@ import numpy as np
 import pytest
 
 from lsmfapi.database import cache as db_cache
-from lsmfapi.models.forecast import GridWindCache, ThermalGridCache
+from lsmfapi.models.forecast import (
+    AltitudeWindLevel,
+    AltitudeWindsProfile,
+    AltitudeWindsResponse,
+    GridWindCache,
+    StationForecastHour,
+    StationForecastResponse,
+    ThermalGridCache,
+)
 
 _INIT = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
 
@@ -21,8 +29,10 @@ def reset_cache_state(tmp_path, monkeypatch):
     monkeypatch.setattr(db_cache, "_LEGACY_GRID_FILES", ())
     db_cache._ch1_station_cache = {}
     db_cache._ch2_station_cache = {}
+    db_cache._ch1_station_cache_prev = {}
     db_cache._ch1_altitude_winds_cache = {}
     db_cache._ch2_altitude_winds_cache = {}
+    db_cache._ch1_altitude_winds_cache_prev = {}
     db_cache._grid_wind_cache = None
     db_cache._thermal_grid_cache = None
     db_cache._grid_wind_model_init = {}
@@ -141,3 +151,140 @@ def test_grid_cache_save_load_round_trip():
     np.testing.assert_array_equal(after_thermal.solar, before_thermal.solar)
     assert after_wind.n_lat == before_wind.n_lat
     assert after_wind.step_deg == before_wind.step_deg
+
+
+# ---------- Station forecast / altitude-winds stitch (CH1/CH2 seam, previous-run backfill) ----------
+
+def _make_hour(valid_time: datetime, wind_speed: float | None = 10.0) -> StationForecastHour:
+    """All fields null unless wind_speed is given — mirrors a failed per-horizon fetch,
+    which leaves every field on that hour None (see _icon_eps_base.py's per-horizon fetch)."""
+    val = None if wind_speed is None else wind_speed
+    return StationForecastHour(
+        valid_time=valid_time,
+        wind_speed=val, wind_speed_min=val, wind_speed_max=val,
+        wind_gust=val, wind_gust_min=val, wind_gust_max=val,
+        wind_direction=val, wind_direction_min=val, wind_direction_max=val,
+        temperature=val, temperature_min=val, temperature_max=val,
+        humidity=val, humidity_min=val, humidity_max=val,
+        pressure_qff=val, pressure_qff_min=val, pressure_qff_max=val,
+        precipitation=val, precipitation_min=val, precipitation_max=val,
+    )
+
+
+def _make_station_forecast(model: str, hours: list[StationForecastHour]) -> StationForecastResponse:
+    return StationForecastResponse(
+        station_id="test-station", init_time=_INIT, model=model, source="swissmeteo", forecast=hours,
+    )
+
+
+def test_merge_station_forecasts_labels_combined_model():
+    ch1 = _make_station_forecast("icon-ch1", [_make_hour(_INIT + timedelta(hours=h)) for h in range(34)])
+    ch2 = _make_station_forecast(
+        "icon-ch2", [_make_hour(_INIT + timedelta(hours=h)) for h in range(34, 40)]
+    )
+    db_cache.set_station_forecast("s1", ch1)
+    db_cache.set_station_forecast("s1", ch2)
+
+    merged = db_cache.get_station_forecast("s1")
+    assert merged.model == "icon-ch1+ch2"
+    assert len(merged.forecast) == 40
+
+
+def test_merge_station_forecasts_keeps_ch1_label_when_ch2_adds_nothing():
+    """CH2 present but contributes no tail (fully behind CH1's range) — no merge actually
+    happened, so the label must not falsely claim CH2 provenance."""
+    ch1 = _make_station_forecast("icon-ch1", [_make_hour(_INIT + timedelta(hours=h)) for h in range(34)])
+    ch2 = _make_station_forecast("icon-ch2", [_make_hour(_INIT + timedelta(hours=10))])
+    db_cache.set_station_forecast("s1", ch1)
+    db_cache.set_station_forecast("s1", ch2)
+
+    merged = db_cache.get_station_forecast("s1")
+    assert merged.model == "icon-ch1"
+
+
+def test_get_station_forecast_backfills_null_hours_from_previous_ch1_run():
+    """Reproduces the reported CH1/CH2 stitch bug: a run whose late horizons (h19-33)
+    failed to fetch must not serve null when the previous CH1 run has real data for the
+    same valid_time — CH2 can't help here since it only covers h34+."""
+    old_run = _make_station_forecast(
+        "icon-ch1", [_make_hour(_INIT + timedelta(hours=h), wind_speed=5.0 + h) for h in range(34)]
+    )
+    db_cache.set_station_forecast("s1", old_run)
+
+    new_init = _INIT + timedelta(hours=6)
+    new_hours = [
+        _make_hour(new_init + timedelta(hours=h), wind_speed=(20.0 + h) if h <= 18 else None)
+        for h in range(34)
+    ]
+    new_run = _make_station_forecast("icon-ch1", new_hours)
+    db_cache.set_station_forecast("s1", new_run)
+
+    result = db_cache.get_station_forecast("s1")
+    assert all(h.wind_speed is not None for h in result.forecast[:19])
+    # h19 of the new run == old run's h25 (both fall on new_init + 19h)
+    backfilled = result.forecast[19]
+    assert backfilled.valid_time == new_init + timedelta(hours=19)
+    assert backfilled.wind_speed == pytest.approx(5.0 + 25)
+    # Backfill only reaches as far as the previous run's own horizon (h33, i.e.
+    # new_init+27h since runs are 6h apart) — h28-33 have no source anywhere and stay null.
+    assert all(h.wind_speed is not None for h in result.forecast[19:28])
+    assert all(h.wind_speed is None for h in result.forecast[28:34])
+
+
+def test_get_station_forecast_no_previous_run_leaves_nulls():
+    """No prior CH1 run cached (e.g. first collection since startup) — nulls stay null
+    rather than crashing or fabricating data."""
+    hours = [_make_hour(_INIT + timedelta(hours=h), wind_speed=None if h >= 19 else 1.0) for h in range(34)]
+    db_cache.set_station_forecast("s1", _make_station_forecast("icon-ch1", hours))
+
+    result = db_cache.get_station_forecast("s1")
+    assert result.forecast[19].wind_speed is None
+
+
+def _make_level(level_m: int, wind_speed: float | None) -> AltitudeWindLevel:
+    return AltitudeWindLevel(
+        level_m=level_m,
+        wind_speed=wind_speed, wind_speed_min=wind_speed, wind_speed_max=wind_speed,
+        wind_direction=wind_speed, wind_direction_min=wind_speed, wind_direction_max=wind_speed,
+        vertical_wind=wind_speed, vertical_wind_min=wind_speed, vertical_wind_max=wind_speed,
+    )
+
+
+def _make_profile(valid_time: datetime, wind_speed: float | None) -> AltitudeWindsProfile:
+    return AltitudeWindsProfile(valid_time=valid_time, levels=[_make_level(1000, wind_speed)])
+
+
+def _make_altitude_winds(model: str, profiles: list[AltitudeWindsProfile]) -> AltitudeWindsResponse:
+    return AltitudeWindsResponse(
+        station_id="test-station", init_time=_INIT, model=model, source="swissmeteo", profiles=profiles,
+    )
+
+
+def test_get_station_altitude_winds_backfills_null_profiles_from_previous_ch1_run():
+    old_run = _make_altitude_winds(
+        "icon-ch1", [_make_profile(_INIT + timedelta(hours=h), 5.0 + h) for h in range(34)]
+    )
+    db_cache.set_station_altitude_winds("s1", old_run)
+
+    new_init = _INIT + timedelta(hours=6)
+    new_profiles = [
+        _make_profile(new_init + timedelta(hours=h), (20.0 + h) if h <= 18 else None) for h in range(34)
+    ]
+    db_cache.set_station_altitude_winds("s1", _make_altitude_winds("icon-ch1", new_profiles))
+
+    result = db_cache.get_station_altitude_winds("s1")
+    backfilled = result.profiles[19]
+    assert backfilled.levels[0].wind_speed == pytest.approx(5.0 + 25)
+
+
+def test_merge_altitude_winds_labels_combined_model():
+    ch1 = _make_altitude_winds("icon-ch1", [_make_profile(_INIT + timedelta(hours=h), 1.0) for h in range(34)])
+    ch2 = _make_altitude_winds(
+        "icon-ch2", [_make_profile(_INIT + timedelta(hours=h), 1.0) for h in range(34, 40)]
+    )
+    db_cache.set_station_altitude_winds("s1", ch1)
+    db_cache.set_station_altitude_winds("s1", ch2)
+
+    merged = db_cache.get_station_altitude_winds("s1")
+    assert merged.model == "icon-ch1+ch2"
+    assert len(merged.profiles) == 40

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "lsmfapi"
-version = "0.3.41"
+version = "0.3.42"
 description = "Lenticularis SwissMeteo Forecast API"
 authors = ["Raphael Eymann <r+claude@eymanns.ch>"]
 packages = [{include = "lsmfapi", from = "src"}]

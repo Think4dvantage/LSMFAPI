@@ -1,16 +1,19 @@
-"""Unit tests for pure-numpy helper functions in collectors/icon_ch1_eps.py.
+"""Unit tests for pure helper functions in collectors/icon_ch1_eps.py and _icon_eps_base.py.
 
-These do not hit the network or eccodes GRIB parsing — only numpy math — but the module
-itself imports eccodes/scipy at load time, so this file needs the full poetry environment
-(same as the integration test), unlike test_ensemble.py / test_cache_persistence.py.
+These do not hit the network or eccodes GRIB parsing — only numpy math and mocked async
+calls — but the modules themselves import eccodes/scipy at load time, so this file needs the
+full poetry environment (same as the integration test), unlike test_ensemble.py /
+test_cache_persistence.py.
 """
 
 import warnings
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 
+import lsmfapi.collectors._icon_eps_base as base_mod
 import lsmfapi.collectors.icon_ch1_eps as ch1_mod
 
 # Model levels top->bottom (as ICON delivers them): heights descending [3000, 2000, 1000, 0]
@@ -93,18 +96,66 @@ def _patch_now(monkeypatch, fixed_now: datetime) -> None:
     monkeypatch.setattr(ch1_mod, "datetime", _FakeDateTime)
 
 
-def test_latest_ref_dt_at_exact_2h_boundary_uses_current_slot(monkeypatch):
-    """Exactly 2h after a release, the guard must NOT push back a further slot."""
-    _patch_now(monkeypatch, datetime(2026, 1, 1, 14, 0, 0, tzinfo=timezone.utc))
+def test_latest_ref_dt_at_exact_guard_boundary_uses_current_slot(monkeypatch):
+    """Exactly REF_DT_GUARD_HOURS (1.5h, since 2026-08-06) after a release, the guard must
+    NOT push back a further slot."""
+    _patch_now(monkeypatch, datetime(2026, 1, 1, 13, 30, 0, tzinfo=timezone.utc))
     assert ch1_mod._latest_ref_dt() == datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_latest_ref_dt_just_inside_guard_falls_back_a_slot(monkeypatch):
-    """This exact boundary (1:59:59 short of 2h) caused a v0.3.1 production data-loss bug."""
-    _patch_now(monkeypatch, datetime(2026, 1, 1, 13, 59, 59, tzinfo=timezone.utc))
+    """This kind of boundary (just short of the guard) caused a v0.3.1 production data-loss
+    bug — re-pinned at 1.5h (was 2h) after the 2026-08-06 guard change."""
+    _patch_now(monkeypatch, datetime(2026, 1, 1, 13, 29, 59, tzinfo=timezone.utc))
     assert ch1_mod._latest_ref_dt() == datetime(2026, 1, 1, 6, 0, 0, tzinfo=timezone.utc)
 
 
 def test_latest_ref_dt_at_midnight_wraps_to_previous_day(monkeypatch):
     _patch_now(monkeypatch, datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc))
     assert ch1_mod._latest_ref_dt() == datetime(2025, 12, 31, 18, 0, 0, tzinfo=timezone.utc)
+
+
+# ---------- _wait_for_full_publish (reproduces the 2026-08-06 CH1 late-horizon bug) ----------
+
+_REF_DT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+
+async def test_wait_for_full_publish_returns_immediately_when_last_horizon_ready(monkeypatch):
+    search = AsyncMock(return_value="https://example.invalid/some.grib2")
+    sleep = AsyncMock()
+    monkeypatch.setattr(base_mod, "_search_item_url", search)
+    monkeypatch.setattr(base_mod.asyncio, "sleep", sleep)
+
+    await base_mod._wait_for_full_publish(None, "https://stac", "coll", _REF_DT, "T_2M", 33, "CH1")
+
+    search.assert_awaited_once()
+    sleep.assert_not_awaited()
+
+
+async def test_wait_for_full_publish_polls_until_ready(monkeypatch):
+    """Reproduces the live-confirmed pattern: h33 404s on the first few checks (MeteoSwiss
+    still publishing) then succeeds — must retry rather than accept the first miss."""
+    search = AsyncMock(side_effect=[None, None, "https://example.invalid/some.grib2"])
+    sleep = AsyncMock()
+    monkeypatch.setattr(base_mod, "_search_item_url", search)
+    monkeypatch.setattr(base_mod.asyncio, "sleep", sleep)
+
+    await base_mod._wait_for_full_publish(None, "https://stac", "coll", _REF_DT, "T_2M", 33, "CH1")
+
+    assert search.await_count == 3
+    assert sleep.await_count == 2  # slept between attempts 1->2 and 2->3, not after success
+
+
+async def test_wait_for_full_publish_gives_up_after_max_attempts(monkeypatch):
+    """MeteoSwiss never publishes the last horizon (or something else is wrong) — must not
+    hang forever. The per-horizon fetch loop already treats a missing asset as null, so
+    giving up and proceeding with a partial run is the correct, safe fallback."""
+    search = AsyncMock(return_value=None)
+    sleep = AsyncMock()
+    monkeypatch.setattr(base_mod, "_search_item_url", search)
+    monkeypatch.setattr(base_mod.asyncio, "sleep", sleep)
+
+    await base_mod._wait_for_full_publish(None, "https://stac", "coll", _REF_DT, "T_2M", 33, "CH1")
+
+    assert search.await_count == base_mod._PUBLISH_POLL_MAX_ATTEMPTS
+    assert sleep.await_count == base_mod._PUBLISH_POLL_MAX_ATTEMPTS

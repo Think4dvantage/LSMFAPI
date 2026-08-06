@@ -76,6 +76,21 @@ GRID_STEP_DEG = 1.0 / 111.0  # ~1 km
 
 DOWNLOAD_CONCURRENCY = 6
 
+# MeteoSwiss publishes a run's horizons progressively, not all at once — REF_DT_GUARD_HOURS
+# only bounds when h0 is likely up, not when the *last* horizon is. Confirmed live on PRD
+# 2026-08-06: two consecutive CH1 runs (00Z, 06Z) had every horizon from ~h18/19 onward 404
+# on every variable, immediately, right at collection start — while a third run (12Z) had
+# all 34 hours ready at the same post-guard offset. The latency genuinely varies run to run,
+# so poll for the run's last horizon before committing to the full fetch, instead of either
+# guessing a bigger fixed guard or accepting a one-shot miss as permanent.
+#
+# CH1's guard/cron were moved 30 min earlier the same day (2h -> 1.5h, see
+# icon_ch1_eps.py/scheduler.py) and the cap raised 90 -> 120 min to match: checking earlier
+# costs nothing on a fast-publishing run (the first poll just succeeds sooner), and the total
+# worst-case wait before the real fetch starts is unchanged (1.5h + 2h = 2h + 1.5h = 3.5h).
+_PUBLISH_POLL_INTERVAL_S = 300  # 5 min
+_PUBLISH_POLL_MAX_ATTEMPTS = 24  # up to 120 min beyond REF_DT_GUARD_HOURS before giving up
+
 # One-time vertical-structure diagnostic guard, keyed by typeOfLevel (see
 # _read_grib2_eccodes). Lets a multi-level GRIB log its level layout exactly once per
 # process instead of once per file. Shared across CH1 and CH2 — this was already the case
@@ -139,6 +154,37 @@ async def _search_item_url(
             variable, horizon_h, ref_dt_str, len(assets),
         )
     return next(iter(assets.values())).get("href")
+
+
+async def _wait_for_full_publish(
+    client: httpx.AsyncClient,
+    stac_base_url: str,
+    collection: str,
+    ref_dt: datetime,
+    variable: str,
+    horizon_h: int,
+    tag: str,
+) -> None:
+    """Poll STAC for the run's last horizon before starting the real fetch, since a fixed
+    post-ref_dt guard doesn't reliably outlast MeteoSwiss's own progressive-publish latency
+    (see the module-level comment above _PUBLISH_POLL_INTERVAL_S). Gives up and returns after
+    _PUBLISH_POLL_MAX_ATTEMPTS — the per-horizon fetch loop in collect() already treats a
+    missing asset as null rather than erroring, so proceeding with a partial run is safe."""
+    for attempt in range(_PUBLISH_POLL_MAX_ATTEMPTS):
+        if await _search_item_url(client, stac_base_url, collection, ref_dt, variable, horizon_h) is not None:
+            return
+        logger.info(
+            "%s ref=%s: h=%d (%s) not yet published — waiting %ds (%d/%d)",
+            tag, ref_dt.isoformat(), horizon_h, variable,
+            _PUBLISH_POLL_INTERVAL_S, attempt + 1, _PUBLISH_POLL_MAX_ATTEMPTS,
+        )
+        await asyncio.sleep(_PUBLISH_POLL_INTERVAL_S)
+    logger.warning(
+        "%s ref=%s: h=%d (%s) still not published after %d attempts (~%d min) — "
+        "proceeding with whatever horizons are available",
+        tag, ref_dt.isoformat(), horizon_h, variable,
+        _PUBLISH_POLL_MAX_ATTEMPTS, _PUBLISH_POLL_MAX_ATTEMPTS * _PUBLISH_POLL_INTERVAL_S // 60,
+    )
 
 
 def _deaccumulate(arr: np.ndarray) -> np.ndarray:
@@ -772,7 +818,7 @@ class IconEpsCollectorBase(BaseCollector):
     MODEL_TAG: str        # "ch1" / "ch2" — telemetry key, collection_state key, grib_run_dir subdir
     MODEL_NAME: str        # "icon-ch1" / "icon-ch2" — stamped into forecast/altitude-wind responses
     ACCUM_PRIOR_H: int | None   # shadow-fetch horizon for the deaccumulation baseline, or None
-    REF_DT_GUARD_HOURS: int     # informational — the guard lives in _latest_ref_dt[_ch2] itself
+    REF_DT_GUARD_HOURS: float   # informational — the guard lives in _latest_ref_dt[_ch2] itself
     GRID_CONSTANTS_PREFIX: str  # "ch1" / "ch2" — horizontal/vertical constants filename suffix
     U_PROBE_FILENAME: str       # temp filename for the pressure-level probe download
     N_MEMBERS: int              # informational only — never used as a gate
@@ -922,6 +968,11 @@ class IconEpsCollectorBase(BaseCollector):
             horizons = self.HORIZONS
 
             async with httpx.AsyncClient(timeout=300) as client:
+
+                await _wait_for_full_publish(
+                    client, cfg.meteoswiss.stac_base_url, self.COLLECTION, ref_dt,
+                    SURFACE_VARS[0], horizons[-1], tag,
+                )
 
                 pres_level_nums: np.ndarray | None = None
                 u0_url = await _search_item_url(

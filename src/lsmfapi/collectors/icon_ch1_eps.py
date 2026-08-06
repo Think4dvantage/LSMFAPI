@@ -69,11 +69,15 @@ _GRID_LEVEL_HEIGHTS: np.ndarray | None = None
 COLLECTION = "ch.meteoschweiz.ogd-forecasting-icon-ch1"
 N_MEMBERS = 11  # informational only — actual count is read from each GRIB run
 HORIZONS = list(range(34))  # 0 h … 33 h inclusive
-REF_DT_GUARD_HOURS = 2
+# 1.5h, not 2h — matches scheduler.py's 01:30/07:30/13:30/19:30 UTC cron. Lowered 2026-08-06:
+# collect()'s _wait_for_full_publish poll (see _icon_eps_base.py) now confirms the run is
+# actually published before fetching, so this guard only needs to rule out a run that
+# obviously hasn't started publishing at all — the poll handles "started but not finished".
+REF_DT_GUARD_HOURS = 1.5
 
 
 def _latest_ref_dt() -> datetime:
-    """Return most recent CH1-EPS run time likely already published (2 h guard)."""
+    """Return most recent CH1-EPS run time likely already published (1.5 h guard)."""
     now = datetime.now(timezone.utc)
     hour = (now.hour // 6) * 6
     candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)

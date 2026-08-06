@@ -1,3 +1,181 @@
+# Resume Notes — 2026-08-06
+
+## CH1/CH2 stitch: root cause confirmed live on PRD, three fixes shipped
+
+**Bug report received from a Lenticularis session** (original text preserved below — parked
+first while the user's usage limit was exhausted, then investigated once it cleared).
+
+**Root cause CONFIRMED live** (`ssh sdh`, `docker exec lsmfapi python -c "...urllib..."` and
+`docker logs lsmfapi`, user explicitly authorized this mid-session after an earlier attempt was
+blocked by the auto-mode classifier) — **variant 1, and more precisely characterized than the
+original report guessed**:
+
+- `docker logs` for the 2026-08-06 00Z run shows every surface variable's STAC search for
+  h=18 through h=33 returning `WARNING CH1 STAC: no asset found for U_10M h=18 — variable may
+  not be published` **within the first 47 seconds of collection start** (`ref_dt=00:00:00`,
+  collection fires at the cron-scheduled 02:00 UTC guard). Same pattern at 10:00:51 UTC for the
+  06Z run's h=19 onward. This is a real "MeteoSwiss hasn't published this yet" 404 from the STAC
+  catalog, checked at the very start of the run — not a slow-queue/semaphore artifact from
+  `DOWNLOAD_CONCURRENCY=6` congestion (ruled out: the failures are immediate, before any of the
+  large W-file downloads that could plausibly delay a queued task).
+- **But it is NOT a permanent per-run guarantee**: querying the live station cache right now
+  (`/api/forecast/station?station_id=meteoswiss-INT`) shows the **12:00 UTC run has zero
+  nulls across all 120 hours** — full 34-hour CH1 publish was already available within the
+  same 2h guard window that 00Z and 06Z both missed. So `REF_DT_GUARD_HOURS=2` is not
+  *structurally* too short (that would make every run fail identically) — **MeteoSwiss's own
+  publish-completion latency for the last few CH1 horizons genuinely varies run to run**,
+  sometimes done well within 2h, sometimes still incomplete an hour or more past that. This
+  means the previous-run backfill fix below (which assumed a permanent per-run gap that a
+  6h-older run would share) actually has a better chance of helping than the original analysis
+  assumed, since not every run is broken — but it's still not the right primary fix, since nulls
+  should be avoided in the first place rather than patched after the fact.
+
+**Three fixes shipped this session, in the order they were written** (`database/cache.py` +
+`_icon_eps_base.py`, tests in `test_cache_persistence.py` / `test_collector_helpers.py`, all
+passing locally where importable — see per-fix notes for what needs CI/PRD instead — no new
+ruff findings in any touched file):
+
+1. **Provenance mislabeling** (`database/cache.py`'s `_merge_station_forecasts`/
+   `_merge_altitude_winds`): the merged response kept `ch1.model` (`"icon-ch1"`) even when a
+   CH2 tail was actually appended, unlike the thermal-grid endpoint's `_combined_model()`
+   convention. Now returns `"icon-ch1+ch2"` when CH2 genuinely contributes a tail, `ch1.model`
+   unchanged otherwise (CH2 present but contributes nothing — an edge case, but a merge that
+   changes nothing shouldn't change the label either). Written before the live check, based on
+   the report's own callout — holds regardless of root cause.
+
+2. **No fallback for null CH1 hours** (`database/cache.py`, the actual reported symptom):
+   `get_station_forecast`/`get_station_altitude_winds` now backfill any null hour/profile from
+   the *previous* CH1 run's entry for the same absolute `valid_time`, per field — added
+   `_ch1_station_cache_prev` / `_ch1_altitude_winds_cache_prev` (in-memory only, stashed in
+   `set_station_forecast`/`set_station_altitude_winds` right before each overwrite). CH2 can
+   never help here (it only covers h34+), so the previous run is the only other source. Written
+   before the live check on the (as it turned out, wrong) assumption that every run fails
+   identically, in which case this would rarely help — the live evidence below shows failures
+   are actually intermittent (the 12Z run had zero nulls), so this fallback has a genuinely good
+   chance of filling gaps from a clean neighboring run. Still bounded: since CH1 runs are 6h
+   apart, it can only reach 6h past wherever the *current* run's own null window starts
+   (`test_get_station_forecast_backfills_null_hours_from_previous_ch1_run` pins this limit).
+   Kept as a safety net even after fix 3 below, for whatever gap remains after the poll's max
+   wait is exhausted.
+
+**Root cause CONFIRMED live** (`ssh sdh`, `docker exec lsmfapi python -c "...urllib..."` and
+`docker logs lsmfapi` — user explicitly authorized this mid-session after an earlier attempt was
+blocked by the auto-mode classifier) before writing fix 3 — **variant 1, and more precisely
+characterized than the original report guessed**:
+
+- `docker logs` for the 2026-08-06 00Z run shows every surface variable's STAC search for
+  h=18 through h=33 returning `WARNING CH1 STAC: no asset found for U_10M h=18 — variable may
+  not be published` **within the first 47 seconds of collection start** (`ref_dt=00:00:00`,
+  collection fires at the cron-scheduled 02:00 UTC guard). Same pattern at 10:00:51 UTC for the
+  06Z run's h=19 onward. This is a real "MeteoSwiss hasn't published this yet" 404 from the STAC
+  catalog, checked at the very start of the run — not a slow-queue/semaphore artifact from
+  `DOWNLOAD_CONCURRENCY=6` congestion (ruled out: the failures are immediate, before any of the
+  large W-file downloads that could plausibly delay a queued task).
+- **But it is NOT a permanent per-run guarantee**: querying the live station cache at
+  investigation time (`/api/forecast/station?station_id=meteoswiss-INT`) showed the **12:00 UTC
+  run had zero nulls across all 120 hours** — full 34-hour CH1 publish was already available
+  within the same 2h guard window that 00Z and 06Z both missed. So `REF_DT_GUARD_HOURS=2` is not
+  *structurally* too short (that would make every run fail identically) — **MeteoSwiss's own
+  publish-completion latency for the last few CH1 horizons genuinely varies run to run**,
+  sometimes done well within 2h, sometimes still incomplete an hour or more past that.
+
+3. **The actual fix for the root cause, added after the live confirmation** — directly
+   implements what both the original report and the user asked for. `_icon_eps_base.py`'s
+   shared `collect()` now polls STAC for the run's **last** horizon (a cheap metadata search,
+   not a download — `SURFACE_VARS[0]` i.e. `U_10M`, the exact variable/pattern seen failing
+   live) before starting the real fetch, via new `_wait_for_full_publish()`: retries every 5 min
+   (`_PUBLISH_POLL_INTERVAL_S`), up to 24 attempts / 120 min (`_PUBLISH_POLL_MAX_ATTEMPTS`)
+   before giving up and proceeding with whatever's available (fixes 1-2 above remain the safety
+   net if MeteoSwiss is unusually slow or a specific file is genuinely missing). No
+   `get_config()`/`datetime.now()` added to the shared module — satisfies the constraint in
+   `04-constraints.md` ("shared modules must take resolved values as parameters") since the loop
+   is pure iteration-count × `asyncio.sleep`, no wall-clock reads needed. Unit tests in
+   `test_collector_helpers.py` (`test_wait_for_full_publish_*`, monkeypatching
+   `_icon_eps_base._search_item_url` and `asyncio.sleep` — cannot run locally, this module
+   imports eccodes/scipy, same constraint as every other test in that file) cover: returns
+   immediately when already published, retries until published, gives up cleanly after the cap.
+
+4. **User follow-up, same session**: since the live 12Z run showed publish can finish well
+   inside the old 2h guard, checking earlier costs nothing on a fast run (the poll's first
+   attempt just succeeds sooner) — so moved the whole pipeline 30 min earlier and extended the
+   patience budget to compensate, keeping the *worst-case* deadline unchanged:
+   - `icon_ch1_eps.py`: `REF_DT_GUARD_HOURS` 2 → 1.5 (also updated its docstring and the
+     `REF_DT_GUARD_HOURS: int` → `float` annotation in `_icon_eps_base.py`'s abstract base,
+     since CH2 stays an int 3 but the shared field now needs to hold either).
+   - `scheduler.py`: CH1's `CronTrigger` `hour="2,8,14,20", minute=0` → `hour="1,7,13,19",
+     minute=30` — stays in lockstep with the guard.
+   - `_icon_eps_base.py`: `_PUBLISH_POLL_MAX_ATTEMPTS` 18 → 24 (90 → 120 min).
+   - Net effect: worst case is identical (1.5h guard + 2h poll = 2h guard + 1.5h poll = 3.5h
+     before the real fetch can start either way), but a run that's actually ready early now gets
+     caught up to 30 min sooner instead of waiting out the rest of a guard that no longer serves
+     a purpose once the poll itself confirms readiness.
+   - Re-pinned the two `_latest_ref_dt` boundary tests in `test_collector_helpers.py` (guard
+     boundary moved from 14:00/13:59:59 to 13:30:00/13:29:59) — the v0.3.1 regression they guard
+     against is about the boundary existing at all, not its specific hour, so re-pinning at the
+     new value keeps the same protection.
+
+**Tradeoff the user was told and accepted**: this delays the *start* of the full fetch (not
+just the late horizons) by up to 2h in the worst case, so h0's freshness lag grows too when a
+run is slow to publish — judged worth it since (a) the alternative is permanently-null hours
+users actively see, and (b) actual observed collection+process time is already ~2-5h past the
+cron trigger even without this delay, so 2h more doesn't materially change the freshness story
+and stays comfortably inside the 6h gap before the next scheduled run. **Verify on PRD**: after
+this deploys, watch for `"h=... not yet published — waiting Ns"` INFO log lines around the new
+01:30/07:30/13:30/19:30 UTC triggers, confirm a subsequent `/api/forecast/station` query for
+that run has no null window, and check whether fast runs (like the observed 12Z one) now start
+their real fetch noticeably earlier than before.
+
+**Not touched**: `/api/forecast/thermal-grid`'s h+8–h33 null window. That endpoint uses a
+different cache representation (`GridWindCache`/`ThermalGridCache`, position-indexed by horizon
+in one shared array — `_populated_range`'s docstring explicitly assumes CH1/CH2 form a single
+contiguous block with no gaps) rather than the per-station forecast list this fix touches.
+Applying the same previous-run backfill there would need a different implementation, not a
+shared helper — left as a follow-up rather than guessed at.
+
+---
+
+**Original bug report** (as received, before investigation):
+
+**Symptom**: `GET /api/forecast/station?station_id=holfuy-1808&hours=120` returns 115 entries
+spanning h+0→h+115, but ~15 consecutive frames in the middle have every weather value null
+(`wind_speed`, `wind_gust`, `wind_direction`, `temperature`, …). Confirmed on two consecutive
+runs:
+- init 2026-08-06T00Z — populated h+0…h+17, null h+18…h+33, populated h+34…h+114
+- init 2026-08-06T06Z — populated h+0…h+18, null h+19…h+33, populated h+34…h+114
+
+The null window always ends at h+33 and data always resumes at h+34 — the ICON-CH1/CH2
+boundary. The start floats around h+18/h+19.
+
+**Hypothesis**: the stitch treats CH1 as owning h+0…h+33 and CH2 as owning h+34+, but the CH1
+slice actually only extends to ~h+18. Frames h+19…h+33 fall inside the "CH1 owns this" range,
+so CH2 is never consulted and they're emitted as nulls. Two variants worth distinguishing:
+1. CH1's ingested horizon really is ~18h (truncated/partial download, or CH1's real horizon is
+   shorter than the hardcoded 33), or
+2. CH1's full 33h is present but index/time-axis alignment drops h+19…h+33.
+
+**Check first**: in the CH1 cache for a given init, what is the largest lead time with non-null
+wind? If it's ~18, it's variant 1 (ingest/horizon); if it's 33, it's variant 2 (stitch
+indexing).
+
+**Fix**: don't let a hardcoded seam decide provenance — fall through per frame (ideally per
+field) to CH2, or to the previous CH1 run, whenever the CH1 value is null. Emitting a null
+where another source has a value is the actual defect.
+
+**Likely shared with the thermal endpoint**: `/api/forecast/thermal-grid` has a documented null
+window of h+8…h+33 — same h+33 upper bound, different start. That points at one shared stitch
+with per-variable CH1 coverage, so fix it in the common path rather than per endpoint.
+
+**Also possibly wrong**: the station response reports `model: "icon-ch1"` even though h+34+
+clearly comes from CH2. The thermal endpoint reports `"icon-ch1+ch2"`. If the station endpoint
+isn't labelling the merge, that may be the same code path getting provenance wrong.
+
+**Repro**:
+```
+curl -s 'http://lsmfapi:8000/api/forecast/station?station_id=holfuy-1808&hours=120' | jq '[.forecast[] | select(.wind_direction == null) | .valid_time]'
+```
+
+---
+
 # Resume Notes — 2026-07-31
 
 ## What Was Done This Session
