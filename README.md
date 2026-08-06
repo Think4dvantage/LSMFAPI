@@ -132,10 +132,10 @@ LSMFAPI ingests two MeteoSwiss high-resolution ensemble models downloaded via th
 
 | Model | Resolution | Horizon | Runs/day | Members |
 |---|---|---|---|---|
-| ICON-CH1-EPS | 1.1 km | 0–33 h (hourly) | 4 (02/08/14/20Z) | 10 (read dynamically) |
+| ICON-CH1-EPS | 1.1 km | 0–33 h (hourly) | 4 (01:30/07:30/13:30/19:30Z) | 10 (read dynamically) |
 | ICON-CH2-EPS | 2.2 km | 34–120 h (hourly) | 4 (03/09/15/21Z) | 21 (read dynamically) |
 
-**Blending rule**: hours 0–33 from CH1-EPS (hourly, 1.1 km resolution); hours 34–120 from CH2-EPS (hourly, 2.2 km). Both models are cached independently and merged at read time — a CH1 re-run refreshes only the near-term slice; the CH2 long-range tail is unaffected, and vice versa.
+**Blending rule**: hours 0–33 from CH1-EPS (hourly, 1.1 km resolution); hours 34–120 from CH2-EPS (hourly, 2.2 km). Both models are cached independently and merged at read time — a CH1 re-run refreshes only the near-term slice; the CH2 long-range tail is unaffected, and vice versa. Before fetching, each collector polls MeteoSwiss to confirm the run has actually finished publishing (publish timing varies run to run) rather than fetching on a fixed schedule and risking permanently-null late hours.
 
 **Ensemble member count**: not hardcoded. The actual count is read from the first valid GRIB result at runtime. CH1 currently delivers 10 members (nominally 11).
 
@@ -301,10 +301,10 @@ healthcheck:
 
 | Job | Trigger | Description |
 |---|---|---|
-| `collect_ch1eps` | 4×/day at 02/08/14/20Z UTC | Downloads CH1-EPS (h0–h33), updates CH1 cache slice |
+| `collect_ch1eps` | 4×/day at 01:30/07:30/13:30/19:30Z UTC | Downloads CH1-EPS (h0–h33), updates CH1 cache slice |
 | `collect_ch2eps` | 4×/day at 03/09/15/21Z UTC | Downloads CH2-EPS (h34–h120), updates CH2 cache slice |
 
-CH1 runs 2 hours after each 00/06/12/18Z model release; CH2 runs 3 hours after. A startup warm-up (CH1 then CH2) runs once when the container starts.
+CH1 runs 1.5 hours after each 00/06/12/18Z model release; CH2 runs 3 hours after. Before the real fetch, each run polls MeteoSwiss's catalog for the run's last horizon and waits (up to 2h) if it's not published yet, rather than fetching on a fixed schedule and risking permanently-null late hours if MeteoSwiss is running behind. A startup warm-up (CH1 then CH2) runs once when the container starts.
 
 **HBAS_CON / HPBL** (`cloud_base_convective`, `boundary_layer_height`) are **not published** in the CH1-EPS or CH2-EPS STAC catalog. Do not re-add them to `SURFACE_VARS`.
 
@@ -421,6 +421,29 @@ the GRIB cache's multi-hundred-GB disk peak (the safe fix requires interleaving 
 computation with the download phase — a bigger rewrite than a quick patch, see `.ai/RESUME.md`
 for the full reasoning), and reducing STAC search call volume by ~34–87× (requires
 restructuring the per-variable/horizon fetch pattern).
+
+### v0.3.40 — Recipe tables no longer created early ✅ Shipped
+
+`init_db()` stopped creating the (empty, unused) `recipes`/`recipe_rules` SQLite tables on
+every boot — they're only needed once v0.4 actually starts using them.
+
+### v0.3.41 — Vertical wind fixed ✅ Shipped
+
+`vertical_wind` on `/api/forecast/altitude-winds` was null in every response, at every
+station and altitude. Cause: `W` is reported on one more vertical level than `U`/`V` (a
+different level convention MeteoSwiss uses for vertical velocity), so it silently failed a
+shape check and was replaced with all-null data. Fixed by sizing each variable's expected
+shape from its own data instead of assuming it matches `U`/`V`.
+
+### v0.3.42 — CH1/CH2 stitch: null late horizons fixed ✅ Shipped
+
+`/api/forecast/station` could go permanently null for a run's last ~15 hours before CH2
+takes over (h19–h33) — root-caused live on the production server: MeteoSwiss's own time to
+finish publishing a run's later hours varies, and CH1 was fetching on a fixed schedule that
+sometimes ran before publishing had finished, with no retry. Fixed by polling MeteoSwiss to
+confirm the run is actually ready before fetching (see the Scheduler jobs section above), plus
+a same-`valid_time` fallback to the previous run's data as a safety net, and a corrected
+`"icon-ch1+ch2"` model label on blended responses (previously always read `"icon-ch1"`).
 
 ### v0.4 — Recipes
 

@@ -13,19 +13,23 @@ _ch2_station_cache: dict[str, StationForecastResponse] = {}  # CH2: h34–h120, 
 # key: station_id  (e.g. "meteoswiss-BER")
 ```
 
-CH1 and CH2 are stored independently so each collector can update its own slice without touching the other. `get_station_forecast()` merges them on the fly: all CH1 entries first (h0–h33, 1h steps), then CH2 entries with `valid_time` strictly after the last CH1 `valid_time` (first appended step is h34).
+CH1 and CH2 are stored independently so each collector can update its own slice without touching the other. `get_station_forecast()` merges them on the fly: all CH1 entries first (h0–h33, 1h steps), then CH2 entries with `valid_time` strictly after the last CH1 `valid_time` (first appended step is h34). The reported `model` is `"icon-ch1+ch2"` when CH2 actually contributes a tail, `"icon-ch1"` unchanged otherwise (fixed 2026-08-06 — was always `"icon-ch1"` even when CH2 data was appended).
+
+**CH1 null-hour backfill** (added 2026-08-06): a per-horizon STAC fetch can fail if MeteoSwiss hasn't published that hour yet (see `_wait_for_full_publish` below), which — before this fix — meant a `StationForecastHour`/`AltitudeWindLevel` with every field `None`, permanently, until the next run. `get_station_forecast()`/`get_station_altitude_winds()` now backfill any such null hour/profile from the *previous* CH1 run's entry for the same `valid_time`, per field. Bounded: since CH1 runs are 6h apart, this only reaches 6h past wherever the current run's own gap starts. `_ch1_station_cache_prev`/`_ch1_altitude_winds_cache_prev` hold the previous run's data purely for this purpose (in-memory only, not persisted to `cache.json`).
 
 **Priority rule**: `set_station_forecast()` routes by `data.model`:
-- `"icon-ch1"` → written to `_ch1_station_cache` (always overwrites own slice)
+- `"icon-ch1"` → written to `_ch1_station_cache` (always overwrites own slice; the prior value is stashed in `_ch1_station_cache_prev` first)
 - anything else → written to `_ch2_station_cache` (always overwrites own slice)
 
 This means a CH1 re-run only refreshes the CH1 dict; the CH2 tail remains intact. A CH2 re-run only refreshes the CH2 dict; the CH1 hourly head remains intact.
 
-- CH1 runs at 02/08/14/20Z UTC (2 h after each 00/06/12/18Z release). Covers h0–h33.
+- CH1 runs at 01:30/07:30/13:30/19:30 UTC (1.5 h after each 00/06/12/18Z release; moved from 2h/02:00 on 2026-08-06 — see `_wait_for_full_publish` below for why). Covers h0–h33.
 - CH2 runs at 03/09/15/21Z UTC (3 h after each 00/06/12/18Z release). Covers h34–h120 only — h0–h33 GRIB files are NOT downloaded by CH2.
 - Both are triggered 4×/day. Warm-up (CH1 then CH2 sequentially) runs once at container startup.
 - API calls are pure dict lookups + in-memory merge, no on-the-fly computation.
 - Station list is fetched from the Lenticularis API on startup and refreshed before each collection run.
+
+**Publish-completion poll** (`_wait_for_full_publish` in `_icon_eps_base.py`, added 2026-08-06): MeteoSwiss publishes a run's horizons progressively, and how long the *last* one takes genuinely varies run to run — confirmed live on PRD, two consecutive CH1 runs had every horizon from ~h18/19 onward 404 in the STAC catalog at the old 2h guard, while the very next run had all 34 hours ready at the same offset. Before the real per-variable fetch loop, `collect()` now polls STAC for the run's last horizon (one cheap metadata search, not a download) every 5 min, up to 120 min, before proceeding either way. `REF_DT_GUARD_HOURS`/the cron trigger were moved 30 min earlier to compensate (checking earlier costs nothing when a run is already published — the poll's first attempt just succeeds sooner — and the worst-case total wait before the fetch starts is unchanged). Shared by both collectors, but CH2 has shown no evidence of this problem (its own polls have always succeeded immediately in observed runs).
 
 ### Wind & thermal grid caches — combined single-array store
 

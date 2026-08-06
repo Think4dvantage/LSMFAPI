@@ -1,6 +1,6 @@
 # Feature History & Backlog
 
-## Current Version: v0.3.7
+## Current Version: v0.3.42
 
 ### Shipped Milestones
 
@@ -49,6 +49,8 @@
 | v0.3.38 | Tech-debt remediation P3-8 (partial, applied to the new shared base module post-P3-5 as the plan required): `compute_stats`/`compute_wind_direction_stats` now accept an ndarray directly (`np.asarray`, no copy) instead of every caller doing `.tolist()` first — removes a numpy→list→numpy round trip on ~296k calls/CH2-run. `_nan_surf` is now float32 (was float64, silently upcasting all 17 stacked surface arrays via `np.stack`). The repeated `level_heights.astype(np.float32)` inside `_interp_to_heights` is now hoisted to the call site in both the station path (3x/collect() → 1x) and grid-build path (2x/horizon → 1x/run). `surf_tasks`/`pres_tasks` are cleared and `u_pl`/`v_pl`/`w_pl` deleted once no longer needed, instead of staying referenced through the whole station-building pass. **Deferred**: dropping `forecast:horizon` from the STAC search payload (34–87× fewer searches) requires restructuring the per-(variable,horizon) fetch pattern into per-variable, a larger and separately-risky change; shrinking `_GRID_LEVEL_HEIGHTS` retention to only sampled+station columns requires station indices earlier than `_ensure_grid` currently has them. Both noted in RESUME for a dedicated follow-up |
 | v0.3.39 | **CI regression fix** — the v0.3.38 tag push was the first time any of this session's 30+ commits actually ran through CI (nothing was pushed mid-session), and it failed in ~30s (setup failure, not a real test run). Root cause: P0-4.1 made `grib_cache.py` call `get_config()` directly; `test_e2e_collection.py` monkeypatches `get_config` on the `icon_ch1_eps` module only, so `grib_cache`'s separate import of the same name bypassed the patch entirely and tried to read a real `config.yml` that doesn't exist in CI. Fixed at the root: `grib_cache.py` no longer imports or calls `get_config()` at all — `grib_run_dir()`/`log_startup_status()` now take the resolved `grib_cache_dir` as an explicit parameter, supplied by callers (`_icon_eps_base.py`'s `collect()` via `self._cfg()`, `scheduler.py` via its own `get_config()`) that were already correctly patchable. Verified locally (this module needs no eccodes) that the full call chain now works without touching real config |
 | v0.3.40 | Tech-debt remediation P2-10 (finally implemented — the decision was made early in the remediation pass but the task was never scheduled): `init_db()` no longer imports `database/models.py` or calls `Base.metadata.create_all()` — no SQLite tables are created until v0.4 (Recipes) actually starts, instead of two empty tables being (re)created every boot for a feature nothing queries. `database/models.py` is untouched, still the v0.4 blueprint |
+| v0.3.41 | `vertical_wind` always null, root-caused and fixed: `W` (vertical wind) is reported on `generalVertical` half-levels (81), one more than `U`/`V`'s `generalVerticalLayer` full levels (80) — `pres_array()` sized every pressure variable's NaN-template off the `U`-derived level count, so `W`'s real 81-level array never matched and was silently replaced by all-NaN with no warning. Fixed by deriving each variable's own template size from its first successfully-shaped result, and averaging `W`'s half-levels down to full levels before interpolation (same technique `_load_level_heights` already uses for `HHL`) |
+| v0.3.42 | CH1/CH2 station stitch: h+19–h+33 permanently null on `/api/forecast/station`, root-caused live on PRD (`ssh sdh` + `docker logs`) — MeteoSwiss's publish-completion latency for CH1's late horizons genuinely varies run to run (two consecutive runs 404'd every horizon past ~h18/19 in the STAC catalog at the 2h guard; the next run had all 34 hours ready at the same offset), not a structural too-short-guard bug. Added `_wait_for_full_publish()` to the shared `collect()` — polls STAC for the run's last horizon before starting the real fetch. Moved CH1's guard/cron 30 min earlier (1.5h/01:30-07:30-13:30-19:30 UTC, was 2h/02:00-08:00-14:00-20:00) with the poll cap raised to compensate, so checking earlier costs nothing on a fast-publishing run while the worst-case deadline stays the same. Also fixed: the merged response now labels `"icon-ch1+ch2"` when CH2 actually contributes a tail (was always `"icon-ch1"`), and null CH1 hours backfill from the previous run's same-`valid_time` entry as a safety net for whatever the poll doesn't catch |
 
 ---
 
@@ -295,6 +297,11 @@ confirm no further `"was missed by"` lines for `collect_ch2eps` without a matchi
 
 ## Known Issues (not yet fixed)
 
-_None currently tracked._ (The previous entry here — "`sunshine_minutes` wrong on CH2 first
-step" — was stale: `ACCUM_PRIOR_H` + the shadow h33 fetch already handle this correctly,
-confirmed during the P1-11 tech-debt pass. See that entry in `.ai/RESUME.md`.)
+- **`/api/forecast/thermal-grid` has a null window around h+8–h33.** Distinct from the
+  v0.3.42 station-endpoint fix — thermal-grid uses a different cache representation
+  (`ThermalGridCache`, position-indexed by horizon in one shared array, which
+  `_populated_range()`'s docstring assumes is always a single contiguous CH1+CH2 block with
+  no gaps) rather than the per-station forecast list v0.3.42 touched. The same
+  `_wait_for_full_publish` root cause likely applies, but the previous-run backfill technique
+  doesn't transfer directly to this cache shape — needs its own fix, not guessed at yet. See
+  `.ai/RESUME.md`'s 2026-08-06 entry.
