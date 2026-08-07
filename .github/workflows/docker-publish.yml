@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+  # Manual re-run button. Needed because a tag push is sometimes never delivered as an
+  # Actions event (e.g. v0.3.42's tag push during a GitHub platform outage never triggered
+  # a run at all, with no automatic retry) — dispatch against the missed tag via the UI's
+  # ref picker or `gh workflow run docker-publish.yml --ref v0.3.42` to redo it.
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
